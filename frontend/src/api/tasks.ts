@@ -8,6 +8,7 @@ export interface CreateTaskPayload {
   dataset_id?: string;
   model_config_ids: string[];
   prompt_ids: string[];
+  baseline_prompt_id?: string;
   test_item_ids?: string[];
   repeat_count: number;
   concurrency?: number;

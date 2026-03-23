@@ -25,6 +25,7 @@ pub struct TaskPrompt {
     pub task_id: String,
     pub prompt_id: String,
     pub label: Option<String>,
+    pub is_baseline: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -57,6 +58,8 @@ pub struct CreateTask {
     /// Max parallel LLM calls (1-20, default 3)
     pub concurrency: Option<i64>,
     pub prompt_ids: Option<Vec<String>>,
+    /// Prompt designated as the comparison baseline (prompt_comparison tasks)
+    pub baseline_prompt_id: Option<String>,
     pub model_config_ids: Option<Vec<String>>,
     /// Selected test item IDs (snapshotted at creation time)
     pub test_item_ids: Option<Vec<String>>,

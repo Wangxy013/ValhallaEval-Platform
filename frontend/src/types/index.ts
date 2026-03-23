@@ -73,6 +73,7 @@ export interface TaskPrompt {
   task_id: string;
   prompt_id: string;
   label?: string;
+  is_baseline?: boolean;
   prompt?: Prompt;
 }
 
@@ -118,6 +119,7 @@ export interface EvalRun {
   prompt?: Prompt;
   model?: ModelConfig;
   prompt_label?: string;
+  prompt_is_baseline?: boolean;
   model_label?: string;
   test_item_content?: string;
   validation_results?: ValidationResult[];
@@ -175,6 +177,7 @@ export interface CheckpointGroupStat {
   criterion: string;
   order_index: number;
   group_label: string;
+  is_baseline?: boolean;
   pass_count: number;
   eval_count: number;
   pass_rate?: number;
@@ -220,6 +223,7 @@ export interface GroupedResult {
   label: string;
   prompt_id?: string;
   model_id?: string;
+  is_baseline?: boolean;
   total: number;
   completed: number;
   pass_count: number;

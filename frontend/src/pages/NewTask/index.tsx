@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import {
   Steps, Card, Button, Form, Input, Radio, Space, Table, Checkbox, InputNumber,
-  Select, Typography, Divider, message, Tag, Row, Col, Alert,
+  Select, Typography, Divider, message, Tag, Row, Col, Alert, Tooltip,
 } from 'antd'
-import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, QuestionCircleOutlined } from '@ant-design/icons'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { listModels } from '../../api/models'
@@ -21,6 +21,7 @@ interface FormState {
   eval_type: EvalType
   model_config_ids: string[]
   prompt_ids: string[]
+  baseline_prompt_id: string   // empty string = auto (first selected)
   dataset_id: string
   test_item_ids: string[]
   repeat_count: number
@@ -36,6 +37,7 @@ const initialState: FormState = {
   eval_type: 'prompt_comparison',
   model_config_ids: [],
   prompt_ids: [],
+  baseline_prompt_id: '',
   dataset_id: '',
   test_item_ids: [],
   repeat_count: 1,
@@ -112,6 +114,7 @@ export default function NewTaskPage() {
       eval_type: form.eval_type,
       model_config_ids: form.model_config_ids,
       prompt_ids: form.prompt_ids,
+      baseline_prompt_id: form.baseline_prompt_id || form.prompt_ids[0] || undefined,
       dataset_id: form.dataset_id,
       test_item_ids: form.test_item_ids,
       repeat_count: form.repeat_count,
@@ -181,16 +184,41 @@ export default function NewTaskPage() {
             if (form.eval_type === 'model_comparison') {
               updateForm({ prompt_ids: e.target.checked ? [record.id] : [] })
             } else {
-              updateForm({
-                prompt_ids: e.target.checked
-                  ? [...form.prompt_ids, record.id]
-                  : form.prompt_ids.filter(id => id !== record.id)
-              })
+              const newIds = e.target.checked
+                ? [...form.prompt_ids, record.id]
+                : form.prompt_ids.filter(id => id !== record.id)
+              // If the deselected prompt was the baseline, clear it
+              const newBaseline = (!e.target.checked && form.baseline_prompt_id === record.id)
+                ? '' : form.baseline_prompt_id
+              updateForm({ prompt_ids: newIds, baseline_prompt_id: newBaseline })
             }
           }}
         />
       ),
     },
+    // Baseline radio — only for prompt_comparison and only for selected prompts
+    ...(form.eval_type === 'prompt_comparison' ? [{
+      title: (
+        <span>
+          基准
+          <Tooltip title="作为对比基准的 Prompt，其他版本的评测结果将与此版本进行差异对比">
+            <QuestionCircleOutlined style={{ marginLeft: 4, color: '#999' }} />
+          </Tooltip>
+        </span>
+      ),
+      key: 'baseline',
+      width: 70,
+      render: (_: unknown, record: Prompt) => {
+        if (!form.prompt_ids.includes(record.id)) return null
+        const effectiveBaseline = form.baseline_prompt_id || form.prompt_ids[0]
+        return (
+          <Radio
+            checked={effectiveBaseline === record.id}
+            onChange={() => updateForm({ baseline_prompt_id: record.id })}
+          />
+        )
+      },
+    }] : []),
     { title: 'Prompt名称', dataIndex: 'name', key: 'name' },
     { title: '版本', dataIndex: 'version', key: 'version', render: (v: string) => <Tag>{v}</Tag> },
     {
@@ -455,7 +483,17 @@ export default function NewTaskPage() {
         <p><strong>任务名称：</strong>{form.name}</p>
         <p><strong>评测类型：</strong>{form.eval_type === 'prompt_comparison' ? 'Prompt对比测试' : '模型横向对比'}</p>
         <p><strong>已选模型：</strong>{form.model_config_ids.length} 个</p>
-        <p><strong>已选Prompt：</strong>{form.prompt_ids.length} 个</p>
+        <p><strong>已选Prompt：</strong>{form.prompt_ids.length} 个
+          {form.eval_type === 'prompt_comparison' && form.prompt_ids.length > 0 && (
+            <span style={{ marginLeft: 8, color: '#999', fontSize: 12 }}>
+              （基准：{(() => {
+                const baseId = form.baseline_prompt_id || form.prompt_ids[0]
+                const p = prompts.find(x => x.id === baseId)
+                return p ? `${p.name} (${p.version})` : '-'
+              })()}）
+            </span>
+          )}
+        </p>
         <p><strong>测试数据：</strong>{form.test_item_ids.length} 条，重复 {form.repeat_count} 次</p>
         <p><strong>并发数：</strong>{form.concurrency} 个同时调用</p>
         <p><strong>校验检查点：</strong>{form.checkpoints.length} 个</p>

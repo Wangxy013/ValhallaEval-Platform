@@ -54,8 +54,9 @@ function CheckpointDiffSummary({ runs }: { runs: EvalRun[] }) {
   const diffs: DiffEntry[] = [...cpIndex.entries()].map(([cpId, meta]) => {
     const runResults = runs.map(run => {
       const vr = run.validation_results?.find(v => v.checkpoint_id === cpId)
+      const label = run.prompt_label ?? run.model_label ?? `版本${runs.indexOf(run) + 1}`
       return {
-        group: run.prompt_label ?? run.model_label ?? `版本${runs.indexOf(run) + 1}`,
+        group: run.prompt_is_baseline ? `${label}（基准）` : label,
         result: vr?.result,
       }
     })
@@ -139,10 +140,16 @@ function RunCard({ run }: { run: EvalRun }) {
   return (
     <Card
       size="small"
-      style={{ height: '100%' }}
+      style={{
+        height: '100%',
+        borderColor: run.prompt_is_baseline ? '#d4af37' : undefined,
+      }}
       title={
         <Space wrap size={4}>
           {run.prompt_label && <Tag color="blue" style={{ marginRight: 0 }}>{run.prompt_label}</Tag>}
+          {run.prompt_is_baseline && (
+            <Tag color="gold" style={{ marginRight: 0, fontSize: 11 }}>基准</Tag>
+          )}
           {run.model_label && <Tag color="purple" style={{ marginRight: 0 }}>{run.model_label}</Tag>}
           {run.repeat_index > 0 && <Tag style={{ marginRight: 0 }}>第{run.repeat_index + 1}次</Tag>}
           <RunStatusTag status={run.status} />
@@ -462,10 +469,16 @@ type PivotCell = { pass_count: number; eval_count: number; pass_rate: number | n
 type PivotRow = { key: string; checkpoint_name: string; criterion: string } & Record<string, PivotCell | string>
 
 function PivotTable({ data, title }: { data: CheckpointGroupStat[]; title: string }) {
-  const { groups, rows } = useMemo(() => {
-    if (data.length === 0) return { groups: [] as string[], rows: [] as PivotRow[] }
+  const { groups, baselineGroup, rows } = useMemo(() => {
+    if (data.length === 0) return { groups: [] as string[], baselineGroup: '', rows: [] as PivotRow[] }
 
+    // Baseline is the group_label where is_baseline === true (first item per group)
+    const baselineItem = data.find(d => d.is_baseline)
+    const baselineGroup = baselineItem?.group_label ?? ''
+
+    // Groups ordered: baseline first, then others
     const groupSet = new Map<string, number>()
+    if (baselineGroup) groupSet.set(baselineGroup, 0)
     data.forEach(r => { if (!groupSet.has(r.group_label)) groupSet.set(r.group_label, groupSet.size) })
     const groups = [...groupSet.keys()]
 
@@ -484,7 +497,7 @@ function PivotTable({ data, title }: { data: CheckpointGroupStat[]; title: strin
       return row
     })
 
-    return { groups, rows }
+    return { groups, baselineGroup, rows }
   }, [data])
 
   if (groups.length === 0) return null
@@ -494,7 +507,7 @@ function PivotTable({ data, title }: { data: CheckpointGroupStat[]; title: strin
   )
   if (!hasAnyData) return null
 
-  const baseGroup = groups[0]
+  const baseGroup = baselineGroup || groups[0]
 
   const columns: ColumnType<PivotRow>[] = [
     {
@@ -516,7 +529,12 @@ function PivotTable({ data, title }: { data: CheckpointGroupStat[]; title: strin
     ...groups.map((g, idx) => ({
       title: (
         <div>
-          <Text strong>{g}</Text>
+          <Space size={4}>
+            <Text strong>{g}</Text>
+            {g === baseGroup && baseGroup !== '' && (
+              <Tag color="gold" style={{ fontSize: 10, padding: '0 4px', marginRight: 0 }}>基准</Tag>
+            )}
+          </Space>
           {idx > 0 && <div style={{ fontSize: 10, color: '#888' }}>对比 {baseGroup}</div>}
         </div>
       ),
@@ -879,7 +897,14 @@ export default function TaskResultPage() {
                 size="small"
                 pagination={false}
                 columns={[
-                  { title: '名称', dataIndex: 'label', key: 'label' },
+                  {
+                    title: '名称', key: 'name', render: (_: unknown, row: { label: string; is_baseline?: boolean }) => (
+                      <Space size={6}>
+                        <Text>{row.label}</Text>
+                        {row.is_baseline && <Tag color="gold" style={{ marginRight: 0, fontSize: 11 }}>基准</Tag>}
+                      </Space>
+                    )
+                  },
                   { title: '总数', dataIndex: 'total', key: 'total', width: 70 },
                   { title: '完成', dataIndex: 'completed', key: 'completed', width: 70 },
                   { title: '通过率', dataIndex: 'pass_rate', key: 'pr', width: 80, render: (v?: number) => v != null ? `${(v * 100).toFixed(1)}%` : <Text type="secondary">-</Text> },
@@ -1025,19 +1050,27 @@ export default function TaskResultPage() {
           pagination={{ pageSize: 20 }}
           expandable={{
             defaultExpandAllRows: groupedItems.length <= 5,
-            expandedRowRender: (record) => (
-              <div style={{ padding: '8px 0' }}>
-                <Row gutter={12} align="stretch">
-                  {record.runs.map(run => (
-                    <Col key={run.id} span={colSpanForRuns(record.runs.length)} style={{ marginBottom: 8 }}>
-                      <RunCard run={run} />
-                    </Col>
-                  ))}
-                </Row>
-                {/* Diff summary below the run cards */}
-                <CheckpointDiffSummary runs={record.runs} />
-              </div>
-            ),
+            expandedRowRender: (record) => {
+              // Baseline first, then others in stable order
+              const sortedRuns = [...record.runs].sort((a, b) => {
+                if (a.prompt_is_baseline && !b.prompt_is_baseline) return -1
+                if (!a.prompt_is_baseline && b.prompt_is_baseline) return 1
+                return 0
+              })
+              return (
+                <div style={{ padding: '8px 0' }}>
+                  <Row gutter={12} align="stretch">
+                    {sortedRuns.map(run => (
+                      <Col key={run.id} span={colSpanForRuns(sortedRuns.length)} style={{ marginBottom: 8 }}>
+                        <RunCard run={run} />
+                      </Col>
+                    ))}
+                  </Row>
+                  {/* Diff summary: ordered baseline-first */}
+                  <CheckpointDiffSummary runs={sortedRuns} />
+                </div>
+              )
+            },
           }}
         />
       ) : (

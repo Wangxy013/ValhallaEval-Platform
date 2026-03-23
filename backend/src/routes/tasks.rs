@@ -94,17 +94,21 @@ pub async fn create_task(
     .await?;
 
     if let Some(prompt_ids) = &payload.prompt_ids {
+        // If baseline_prompt_id is not set, default to the first prompt
+        let baseline = payload.baseline_prompt_id.as_deref()
+            .or_else(|| prompt_ids.first().map(|s| s.as_str()));
         for prompt_id in prompt_ids {
             let tp_id = Uuid::new_v4().to_string();
-            sqlx::query("INSERT INTO task_prompts (id, task_id, prompt_id) VALUES ($1, $2, $3)")
+            let is_baseline = baseline == Some(prompt_id.as_str());
+            sqlx::query("INSERT INTO task_prompts (id, task_id, prompt_id, is_baseline) VALUES ($1, $2, $3, $4)")
                 .bind(&tp_id)
                 .bind(&id)
                 .bind(prompt_id)
+                .bind(is_baseline)
                 .execute(&pool)
                 .await?;
         }
     }
-
     if let Some(model_ids) = &payload.model_config_ids {
         for model_id in model_ids {
             let tm_id = Uuid::new_v4().to_string();
@@ -189,7 +193,7 @@ async fn get_task_with_associations(pool: &PgPool, id: &str) -> AppResult<Value>
     .ok_or_else(|| AppError::NotFound(format!("Task {} not found", id)))?;
 
     let prompts = sqlx::query_as::<_, TaskPrompt>(
-        "SELECT id, task_id, prompt_id, label FROM task_prompts WHERE task_id = $1"
+        "SELECT id, task_id, prompt_id, label, is_baseline FROM task_prompts WHERE task_id = $1"
     )
     .bind(id)
     .fetch_all(pool)
@@ -271,15 +275,15 @@ pub async fn update_task(
             .await?;
         for prompt_id in prompt_ids {
             let tp_id = Uuid::new_v4().to_string();
-            sqlx::query("INSERT INTO task_prompts (id, task_id, prompt_id) VALUES ($1, $2, $3)")
+            sqlx::query("INSERT INTO task_prompts (id, task_id, prompt_id, is_baseline) VALUES ($1, $2, $3, $4)")
                 .bind(&tp_id)
                 .bind(&id)
                 .bind(prompt_id)
+                .bind(false)  // update_task doesn't change baseline; reset to false, use separate endpoint if needed
                 .execute(&pool)
                 .await?;
         }
     }
-
     if let Some(model_ids) = &payload.model_config_ids {
         sqlx::query("DELETE FROM task_models WHERE task_id = $1")
             .bind(&id)
@@ -344,7 +348,7 @@ pub async fn execute_task(
     }
 
     let task_prompts = sqlx::query_as::<_, TaskPrompt>(
-        "SELECT id, task_id, prompt_id, label FROM task_prompts WHERE task_id = $1"
+        "SELECT id, task_id, prompt_id, label, is_baseline FROM task_prompts WHERE task_id = $1"
     )
     .bind(&id)
     .fetch_all(&pool)
@@ -643,28 +647,31 @@ pub async fn get_task_runs(
 
     let mut enriched = Vec::new();
     for run in &runs {
-        // Get prompt name via task_prompt_id -> task_prompts -> prompts
-        let prompt_label: Option<String> = if let Some(tp_id) = &run.task_prompt_id {
-            sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
-                "SELECT tp.label, p.name, p.version FROM task_prompts tp LEFT JOIN prompts p ON p.id = tp.prompt_id WHERE tp.id = $1"
+        // Get prompt name + is_baseline via task_prompt_id -> task_prompts -> prompts
+        let prompt_info: Option<(String, bool)> = if let Some(tp_id) = &run.task_prompt_id {
+            sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, bool)>(
+                "SELECT tp.label, p.name, p.version, tp.is_baseline FROM task_prompts tp LEFT JOIN prompts p ON p.id = tp.prompt_id WHERE tp.id = $1"
             )
             .bind(tp_id)
             .fetch_optional(&pool)
             .await
             .ok()
             .flatten()
-            .map(|(label, name, version)| {
-                label.unwrap_or_else(|| {
+            .map(|(label, name, version, is_baseline)| {
+                let label_str = label.unwrap_or_else(|| {
                     match (name, version) {
                         (Some(n), Some(v)) => format!("{} ({})", n, v),
                         (Some(n), _) => n,
                         _ => tp_id.clone(),
                     }
-                })
+                });
+                (label_str, is_baseline)
             })
         } else {
             None
         };
+        let prompt_label = prompt_info.as_ref().map(|(l, _)| l.clone());
+        let prompt_is_baseline = prompt_info.as_ref().map(|(_, b)| *b).unwrap_or(false);
 
         // Get model name via task_model_id -> task_models -> model_configs
         let model_label: Option<String> = sqlx::query_as::<_, (Option<String>, Option<String>)>(
@@ -746,6 +753,7 @@ pub async fn get_task_runs(
             "created_at": run.created_at,
             "completed_at": run.completed_at,
             "prompt_label": prompt_label,
+            "prompt_is_baseline": prompt_is_baseline,
             "model_label": model_label,
             "test_item_content": test_item_content,
             "assessment_results": assessment_results,
@@ -1243,9 +1251,9 @@ pub async fn get_results_overview(
         None
     };
 
-    // By prompt grouping — use subqueries to avoid JOIN multiplication
+    // By prompt grouping — baseline first, then others
     let by_prompt_rows = sqlx::query(
-        "SELECT tp.id as tp_id, tp.label, tp.prompt_id,
+        "SELECT tp.id as tp_id, tp.label, tp.prompt_id, tp.is_baseline,
             p.name as prompt_name, p.version as prompt_version,
             (SELECT COUNT(*) FROM eval_runs WHERE task_prompt_id = tp.id) as total,
             (SELECT COUNT(*) FROM eval_runs WHERE task_prompt_id = tp.id AND status='completed') as completed,
@@ -1260,7 +1268,8 @@ pub async fn get_results_overview(
                WHERE er.task_prompt_id = tp.id) as avg_score
          FROM task_prompts tp
          LEFT JOIN prompts p ON p.id = tp.prompt_id
-         WHERE tp.task_id = $1"
+         WHERE tp.task_id = $1
+         ORDER BY tp.is_baseline DESC, tp.id ASC"
     ).bind(&id).fetch_all(&pool).await?;
 
     let by_prompt: Vec<Value> = by_prompt_rows.iter().map(|row| {
@@ -1274,6 +1283,7 @@ pub async fn get_results_overview(
         let prompt_name: Option<String> = row.try_get("prompt_name").ok().flatten();
         let prompt_version: Option<String> = row.try_get("prompt_version").ok().flatten();
         let prompt_id: String = row.try_get("prompt_id").unwrap_or_default();
+        let is_baseline: bool = row.try_get("is_baseline").unwrap_or(false);
         // Only show pass_rate if validation has been run
         let pass_rate: Option<f64> = if validation_total > 0 {
             Some(pass_count as f64 / validation_total as f64)
@@ -1290,6 +1300,7 @@ pub async fn get_results_overview(
         json!({
             "label": display_label,
             "prompt_id": prompt_id,
+            "is_baseline": is_baseline,
             "total": total,
             "completed": completed,
             "pass_count": pass_count,
@@ -1380,9 +1391,10 @@ pub async fn get_results_overview(
     }).collect();
 
     // Checkpoint × Prompt pivot: for each (checkpoint, prompt version) pair, pass rate
+    // baseline-first ordering so delta column always compares against baseline
     let cp_prompt_rows = sqlx::query(
         "SELECT vc.id as cp_id, vc.name as cp_name, vc.criterion, vc.order_index,
-                tp.id as tp_id,
+                tp.id as tp_id, tp.is_baseline,
                 COALESCE(tp.label, p.name || ' (' || p.version || ')') as group_label,
                 COUNT(CASE WHEN vr.status = 'pass' THEN 1 END) as pass_count,
                 COUNT(CASE WHEN vr.status IN ('pass', 'fail') THEN 1 END) as eval_count
@@ -1392,8 +1404,8 @@ pub async fn get_results_overview(
          LEFT JOIN eval_runs er ON er.task_prompt_id = tp.id AND er.task_id = $1
          LEFT JOIN validation_results vr ON vr.eval_run_id = er.id AND vr.checkpoint_id = vc.id
          WHERE vc.task_id = $1 AND tp.task_id = $1
-         GROUP BY vc.id, vc.name, vc.criterion, vc.order_index, tp.id, tp.label, p.name, p.version
-         ORDER BY vc.order_index ASC, tp.id ASC"
+         GROUP BY vc.id, vc.name, vc.criterion, vc.order_index, tp.id, tp.label, tp.is_baseline, p.name, p.version
+         ORDER BY vc.order_index ASC, tp.is_baseline DESC, tp.id ASC"
     ).bind(&id).fetch_all(&pool).await.unwrap_or_default();
 
     let by_checkpoint_prompt: Vec<Value> = cp_prompt_rows.iter().map(|row| {
@@ -1402,11 +1414,13 @@ pub async fn get_results_overview(
         let criterion: String = row.try_get("criterion").unwrap_or_default();
         let order_index: i32 = row.try_get("order_index").unwrap_or(0);
         let group_label: String = row.try_get("group_label").unwrap_or_default();
+        let is_baseline: bool = row.try_get("is_baseline").unwrap_or(false);
         let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
         let eval_count: i64 = row.try_get("eval_count").unwrap_or(0);
         let pass_rate: Option<f64> = if eval_count > 0 { Some(pass_count as f64 / eval_count as f64) } else { None };
         json!({ "checkpoint_name": cp_name, "criterion": criterion, "order_index": order_index,
-                "group_label": group_label, "pass_count": pass_count, "eval_count": eval_count, "pass_rate": pass_rate })
+                "group_label": group_label, "is_baseline": is_baseline,
+                "pass_count": pass_count, "eval_count": eval_count, "pass_rate": pass_rate })
     }).collect();
 
     // Checkpoint × Model pivot
