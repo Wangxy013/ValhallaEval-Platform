@@ -4,7 +4,7 @@ services:
   # ── PostgreSQL ──────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: eval-tools-postgres
+    container_name: valhalla-eval-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: eval_user
@@ -23,7 +23,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: eval-tools-backend
+    container_name: valhalla-eval-backend
     restart: unless-stopped
     depends_on:
       postgres:
@@ -40,7 +40,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    container_name: eval-tools-frontend
+    container_name: valhalla-eval-frontend
     restart: unless-stopped
     depends_on:
       - backend

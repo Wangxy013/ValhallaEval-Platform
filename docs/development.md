@@ -31,7 +31,7 @@
 
 ```bash
 git clone <repo-url>
-cd Edu-Model-Eval-Tools
+cd ValhallaEval
 ```
 
 ### 2. 配置环境变量

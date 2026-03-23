@@ -1,10 +1,10 @@
 <div align="center">
 
-# 大模型 Prompt 与模型评测系统
+# ValhallaEval
 
-**LLM Prompt & Model Evaluation Tool**
+**Norse-Inspired LLM Evaluation Platform**
 
-一款面向 Prompt 调优与模型横向评测的自研 Web 工具。支持多版本 Prompt 并行测试、多模型横向对比、验证点自动校验与多模式评估，帮助团队高效验证 Prompt 指令生效情况与模型效果差异。
+一款面向 Prompt 调优验证与模型横向评测的 Web 平台，支持多版本 Prompt 并行测试、多模型效果对比、验证点自动校验与多模式评估，帮助团队高效验证 Prompt 指令生效情况与模型能力差异。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Backend: Rust](https://img.shields.io/badge/Backend-Rust%20%2B%20Axum-orange)](https://www.rust-lang.org/)
@@ -19,12 +19,15 @@
 | 功能 | 说明 |
 |---|---|
 | **Prompt 多版本对比** | 同一模型、多个 Prompt 版本并行推理，直观对比修改效果 |
+| **基准 Prompt** | 指定一个版本作为对比基准，结果对比围绕基准展开，明细页基准优先展示 |
 | **模型横向评测** | 同一 Prompt、多个模型同时推理，量化模型差异 |
 | **批量测试** | 支持多条测试数据批量推理，全程使用无上下文的全新会话 |
+| **并发执行** | 可配置并发数（1-20），三个阶段同时发起多个 LLM 调用，告别串行等待 |
 | **验证点自动校验** | 自定义校验标准，由 LLM 裁判模型逐条判断 通过/未通过 |
 | **验证点对比矩阵** | 总览页按验证点×版本呈现通过率矩阵，直观显示 +N% 改善或退步 |
 | **差异高亮** | 明细页同一测试数据多版本并排，自动标注改善/退步的验证点 |
 | **多模式评估** | 人工评估 / 模型自动评分（0–10）/ 自定义规则，三种模式自由选择 |
+| **实时进度面板** | 三阶段（推理→校验→评估）独立进度条，2s 轮询实时更新 |
 | **结果可复现** | 测试数据与 Prompt 在任务创建时快照锁定，保证评测一致性 |
 
 ---
@@ -39,16 +42,16 @@
                       │ HTTP / REST (JSON)
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Rust API Server (Axum)                    │
+│                    Rust API Server (Axum)                   │
 │  routes/tasks.rs   routes/prompts.rs   routes/datasets.rs   │
 │  routes/models.rs                                           │
 │                                                             │
-│  ┌─────────────────┐   ┌──────────────────────────────┐    │
-│  │  LLM Client     │   │  tokio::spawn background tasks│    │
-│  │  (reqwest)      │   │  · execute_task               │    │
-│  │  OpenAI-compat  │   │  · validate_task              │    │
-│  └────────┬────────┘   │  · auto_assess_task           │    │
-│           │            └──────────────────────────────┘    │
+│  ┌─────────────────┐   ┌────────────────────────────────┐  │
+│  │  LLM Client     │   │  tokio::spawn background tasks │  │
+│  │  (reqwest)      │   │  · execute_task (Semaphore N)  │  │
+│  │  OpenAI-compat  │   │  · validate_task (Semaphore N) │  │
+│  └────────┬────────┘   │  · auto_assess_task (Semaphore N)│  │
+│           │            └────────────────────────────────┘  │
 └───────────┼─────────────────────────────────────────────────┘
             │                          │
             ▼                          ▼
@@ -72,7 +75,7 @@
 ### 一键启动（开发模式）
 
 ```bash
-git clone <repo-url> && cd Edu-Model-Eval-Tools
+git clone <repo-url> && cd ValhallaEval
 cp backend/.env.example backend/.env   # 按需修改数据库连接
 chmod +x dev.sh && ./dev.sh
 ```
@@ -97,49 +100,72 @@ cd frontend && npm install && npm run dev
 ## 目录结构
 
 ```
-Edu-Model-Eval-Tools/
-├── README.md                     # 本文件
+ValhallaEval/
+├── README.md                     # 项目总览
 ├── CHANGELOG.md                  # 版本变更记录
 ├── CONTRIBUTING.md               # 贡献指南
-├── LICENSE                       # 开源许可
-├── docker-compose.yml            # PostgreSQL 容器配置
+├── LICENSE                       # MIT 开源许可
+├── .gitignore
+├── .editorconfig                 # 编辑器统一配置
+│
+├── docker-compose.yml            # 开发环境 PostgreSQL
+├── docker-compose.prod.yml       # 生产环境完整部署
+├── Dockerfile.backend             # 后端多阶段构建
+├── Dockerfile.frontend           # 前端 Nginx 构建
+├── docker/nginx.conf             # 前端 Nginx 配置
+├── .env.prod.example             # 生产环境变量示例
+│
 ├── dev.sh                        # 一键开发启动脚本
 │
-├── docs/                         # 文档
-│   ├── architecture.md           # 技术架构设计
-│   ├── api-reference.md          # API 接口参考
-│   ├── development.md            # 开发指南
-│   ├── deployment.md             # 生产部署指南
-│   └── user-guide/               # 用户使用手册
-│       ├── README.md             # 使用手册总览
-│       ├── 01-getting-started.md
-│       ├── 02-model-management.md
-│       ├── 03-prompt-management.md
-│       ├── 04-dataset-management.md
-│       ├── 05-create-task.md
-│       ├── 06-run-and-validate.md
-│       └── 07-analyze-results.md
-│
 ├── backend/                      # Rust + Axum 后端
-│   ├── .env.example
 │   ├── Cargo.toml
+│   ├── Cargo.lock
+│   ├── .env / .env.example
 │   ├── migrations/               # SQLx 数据库迁移
+│   │   ├── 20240101000001_initial.up.sql
+│   │   ├── 20240101000002_add_concurrency.up.sql
+│   │   └── 20240101000003_add_baseline_prompt.up.sql
 │   └── src/
 │       ├── main.rs               # 入口 & 路由注册
 │       ├── error.rs              # 统一错误处理
-│       ├── db/                   # 数据库连接池初始化
+│       ├── db/                   # 数据库连接池
 │       ├── llm/                  # LLM API 客户端
 │       ├── models/               # 数据结构定义
 │       └── routes/               # 路由处理函数
 │
-└── frontend/                     # React + TypeScript 前端
-    ├── package.json
-    ├── vite.config.ts
-    └── src/
-        ├── api/                  # API 请求封装
-        ├── components/           # 通用组件
-        ├── pages/                # 页面组件
-        └── types/                # TypeScript 类型定义
+├── frontend/                     # React + TypeScript 前端
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── tsconfig.json
+│   ├── index.html
+│   └── src/
+│       ├── main.tsx              # 入口
+│       ├── App.tsx               # 布局 & 路由
+│       ├── api/                  # API 请求封装
+│       ├── components/           # 通用组件
+│       ├── pages/                # 页面组件
+│       ├── hooks/                # 自定义 Hooks
+│       ├── stores/               # 状态管理
+│       ├── types/                # TypeScript 类型
+│       └── utils/                # 工具函数
+│
+└── docs/                         # 项目文档
+    ├── README.md                 # 文档索引
+    ├── architecture.md           # 技术架构设计
+    ├── api-reference.md          # API 接口参考
+    ├── development.md            # 开发指南
+    ├── deployment.md              # 生产部署指南
+    ├── requirements/              # 需求文档
+    │   └── ValhallaEval-需求文档.md
+    └── user-guide/               # 用户使用手册
+        ├── README.md
+        ├── 01-getting-started.md
+        ├── 02-model-management.md
+        ├── 03-prompt-management.md
+        ├── 04-dataset-management.md
+        ├── 05-create-task.md
+        ├── 06-run-and-validate.md
+        └── 07-analyze-results.md
 ```
 
 ---
@@ -156,7 +182,7 @@ Edu-Model-Eval-Tools/
 | UI 组件库 | Ant Design | 5 |
 | 数据请求 | TanStack Query + Axios | 5 / 1 |
 | 数据库 | PostgreSQL | 16 |
-| 容器化 | Docker Compose | — |
+| 容器化 | Docker Compose | v2 |
 
 ---
 

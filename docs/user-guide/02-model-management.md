@@ -11,9 +11,9 @@
 | 提供商 | 提供商标识 | API URL 示例 |
 |---|---|---|
 | 字节跳动豆包 | `doubao` | `https://ark.cn-beijing.volces.com/api/v3` |
-| 讯飞星火教育 | `spark_edu` | 由讯飞提供 |
+| 科大讯飞星火 | `spark` | 由讯飞提供 |
 | OpenAI | `openai` | `https://api.openai.com/v1` |
-| 其他 OpenAI 兼容服务 | 自定义 | 由服务商提供 |
+| 其他 OpenAI 兼容服务 | `openai_compatible` | 由服务商提供 |
 
 > 系统底层使用 OpenAI Chat Completions 格式（`POST {api_url}/chat/completions`），任何兼容该格式的模型均可接入。
 

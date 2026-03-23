@@ -25,7 +25,6 @@
 - [评估](#评估)
 - [结果查询](#结果查询)
 - [进度查询](#进度查询)
-- [结果查询](#结果查询)
 
 ---
 
@@ -207,9 +206,11 @@ POST /api/v1/tasks
   "eval_type": "prompt_comparison",
   "model_config_ids": ["model-uuid"],
   "prompt_ids": ["prompt-v1-uuid", "prompt-v2-uuid"],
+  "baseline_prompt_id": "prompt-v1-uuid",
   "dataset_id": "dataset-uuid",
   "test_item_ids": ["item-1-uuid", "item-2-uuid"],
   "repeat_count": 1,
+  "concurrency": 3,
   "assessment_mode": "auto",
   "validation_checkpoints": [
     { "name": "格式规范", "criterion": "输出必须包含【答案】和【解析】两个部分" },
@@ -223,8 +224,11 @@ POST /api/v1/tasks
 | `eval_type` | string | ✓ | `prompt_comparison` 或 `model_comparison` |
 | `model_config_ids` | string[] | ✓ | Prompt 对比模式需恰好 1 个；模型对比需 2+ 个 |
 | `prompt_ids` | string[] | ✓ | Prompt 对比模式需 2+ 个；模型对比需恰好 1 个 |
-| `test_item_ids` | string[] | ✓ | 选中的测试数据 ID，任务创建时立即快照 |
+| `baseline_prompt_id` | string | — | Prompt 对比模式下的对比基准，默认为第一个选中的 Prompt |
+| `dataset_id` | string | — | 关联的数据集 ID |
+| `test_item_ids` | string[] | — | 选中的测试数据 ID，任务创建时立即快照 |
 | `repeat_count` | number | — | 每条数据重复次数，默认 1，最大建议 5 |
+| `concurrency` | number | — | 三个阶段同时发起的最大 LLM 请求数（1-20），默认 3 |
 | `assessment_mode` | string | — | `manual`/`auto`/`custom`，默认 `manual` |
 | `validation_checkpoints` | array | — | 校验检查点，不填则无法使用验证校验功能 |
 
@@ -249,7 +253,7 @@ GET /api/v1/tasks/:id
 ```json
 {
   "task": { "id": "...", "name": "...", "status": "completed", "eval_type": "prompt_comparison", ... },
-  "prompts": [{ "id": "tp-uuid", "task_id": "...", "prompt_id": "...", "label": null, "prompt": {...} }],
+  "prompts": [{ "id": "tp-uuid", "task_id": "...", "prompt_id": "...", "label": null, "is_baseline": true, "prompt": {...} }],
   "models":  [{ "id": "tm-uuid", "task_id": "...", "model_config_id": "...", "model": {...} }],
   "test_items": [{ "id": "tti-uuid", "content_snapshot": "...", "order_index": 0 }]
 }
@@ -319,6 +323,7 @@ GET /api/v1/tasks/:id/runs
   "tokens_used": 256,
   "duration_ms": 1823,
   "prompt_label": "答题助手 (v2)",
+  "prompt_is_baseline": false,
   "model_label": "豆包 Pro",
   "test_item_content": "已知三角形...",
   "validation_results": [
@@ -440,8 +445,8 @@ GET /api/v1/tasks/:id/results/overview
   "validation_pass_rate": 0.875,
   "avg_assessment_score": 8.2,
   "by_prompt": [
-    { "label": "答题助手 (v1)", "total": 10, "completed": 10, "pass_count": 15, "pass_rate": 0.75, "avg_score": 7.8 },
-    { "label": "答题助手 (v2)", "total": 10, "completed": 10, "pass_count": 20, "pass_rate": 1.0,  "avg_score": 9.1 }
+    { "label": "答题助手 (v1)", "is_baseline": true, "total": 10, "completed": 10, "pass_count": 15, "pass_rate": 0.75, "avg_score": 7.8 },
+    { "label": "答题助手 (v2)", "is_baseline": false, "total": 10, "completed": 10, "pass_count": 20, "pass_rate": 1.0,  "avg_score": 9.1 }
   ],
   "by_model": [],
   "by_checkpoint": [
@@ -449,10 +454,10 @@ GET /api/v1/tasks/:id/results/overview
     { "name": "内容准确", "criterion": "...", "pass_count": 17, "eval_count": 20, "pass_rate": 0.85 }
   ],
   "by_checkpoint_prompt": [
-    { "checkpoint_name": "格式规范", "criterion": "...", "order_index": 0, "group_label": "答题助手 (v1)", "pass_count": 7,  "eval_count": 10, "pass_rate": 0.7 },
-    { "checkpoint_name": "格式规范", "criterion": "...", "order_index": 0, "group_label": "答题助手 (v2)", "pass_count": 10, "eval_count": 10, "pass_rate": 1.0 },
-    { "checkpoint_name": "内容准确", "criterion": "...", "order_index": 1, "group_label": "答题助手 (v1)", "pass_count": 8,  "eval_count": 10, "pass_rate": 0.8 },
-    { "checkpoint_name": "内容准确", "criterion": "...", "order_index": 1, "group_label": "答题助手 (v2)", "pass_count": 9,  "eval_count": 10, "pass_rate": 0.9 }
+    { "checkpoint_name": "格式规范", "criterion": "...", "order_index": 0, "group_label": "答题助手 (v1)", "is_baseline": true,  "pass_count": 7,  "eval_count": 10, "pass_rate": 0.7 },
+    { "checkpoint_name": "格式规范", "criterion": "...", "order_index": 0, "group_label": "答题助手 (v2)", "is_baseline": false, "pass_count": 10, "eval_count": 10, "pass_rate": 1.0 },
+    { "checkpoint_name": "内容准确", "criterion": "...", "order_index": 1, "group_label": "答题助手 (v1)", "is_baseline": true,  "pass_count": 8,  "eval_count": 10, "pass_rate": 0.8 },
+    { "checkpoint_name": "内容准确", "criterion": "...", "order_index": 1, "group_label": "答题助手 (v2)", "is_baseline": false, "pass_count": 9,  "eval_count": 10, "pass_rate": 0.9 }
   ],
   "by_checkpoint_model": []
 }
@@ -503,12 +508,3 @@ GET /api/v1/tasks/:id/progress
 | `validation.pending` | status='pending' 的记录数（>0 表示校验进行中） |
 | `assessment.done` | 已完成自动评估的 eval_run 数（按 mode='auto' 去重） |
 
----
-
-## 创建任务新增字段
-
-`POST /api/v1/tasks` 的请求体新增以下字段（可选）：
-
-| 字段 | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `concurrency` | number | 3 | 三个阶段同时发起的最大 LLM 请求数，范围 1-20，建议 3-5 |

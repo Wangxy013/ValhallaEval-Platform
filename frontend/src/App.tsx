@@ -58,12 +58,19 @@ export default function App() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          color: '#fff',
-          fontSize: 16,
-          fontWeight: 600,
+          gap: 10,
           borderBottom: '1px solid rgba(255,255,255,0.1)',
+          padding: '0 12px',
         }}>
-          LLM 评测工具
+          <img src="/logo.png" alt="logo" style={{ width: 32, height: 32, objectFit: 'contain', flexShrink: 0 }} />
+          <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.3 }}>
+            <span style={{ color: '#fff', fontSize: 15, fontWeight: 700, letterSpacing: 1 }}>
+              ValhallaEval
+            </span>
+            <span style={{ color: 'rgba(255,255,255,0.55)', fontSize: 11, fontWeight: 400 }}>
+              大模型评测平台
+            </span>
+          </div>
         </div>
         <Menu
           theme="dark"

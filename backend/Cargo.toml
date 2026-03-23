@@ -1,6 +1,6 @@
 [package]
-name = "eval-tools-backend"
-version = "0.1.0"
+name = "valhalla-eval-backend"
+version = "0.6.0"
 edition = "2021"
 
 [dependencies]

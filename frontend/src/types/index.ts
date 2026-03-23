@@ -1,7 +1,12 @@
+export type ProviderType =
+  | 'doubao' | 'spark' | 'qwen' | 'ernie' | 'zhipu'
+  | 'kimi' | 'hunyuan' | 'deepseek' | 'yi'
+  | 'openai' | 'openai_compatible' | string
+
 export interface ModelConfig {
   id: string;
   name: string;
-  provider: 'doubao' | 'spark_edu' | 'openai' | string;
+  provider: ProviderType;
   api_key: string;
   api_url: string;
   model_id: string;

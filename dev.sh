@@ -13,7 +13,7 @@ cd "$ROOT/backend"
 cargo build --quiet
 DATABASE_URL=postgresql://postgres:password@localhost:5432/eval_tools \
   PORT=8080 RUST_LOG=info \
-  ./target/debug/eval-tools-backend &
+  ./target/debug/valhalla-eval-backend &
 BACKEND_PID=$!
 echo "   后端 PID: $BACKEND_PID"
 
