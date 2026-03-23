@@ -195,6 +195,26 @@ export interface TaskResultsOverview {
   by_checkpoint_model: CheckpointGroupStat[];
 }
 
+export interface TaskProgress {
+  inference: {
+    total: number;
+    completed: number;
+    failed: number;
+  };
+  validation: {
+    checkpoint_count: number;
+    expected: number;
+    done: number;
+    pending: number;
+    pass: number;
+    fail: number;
+  };
+  assessment: {
+    expected: number;
+    done: number;
+  };
+}
+
 export interface GroupedResult {
   label: string;
   prompt_id?: string;

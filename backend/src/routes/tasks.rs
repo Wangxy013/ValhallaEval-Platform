@@ -1462,6 +1462,92 @@ pub async fn get_results_overview(
     })))
 }
 
+pub async fn get_task_progress(
+    State(pool): State<PgPool>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    // Verify task exists
+    let task_exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE id = $1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await?;
+    if task_exists.0 == 0 {
+        return Err(AppError::NotFound(format!("任务 {} 不存在", id)));
+    }
+
+    // --- Inference progress ---
+    let (total_runs, completed_runs, failed_runs): (i64, i64, i64) = {
+        let r: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1")
+            .bind(&id).fetch_one(&pool).await?;
+        let c: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='completed'")
+            .bind(&id).fetch_one(&pool).await?;
+        let f: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='failed'")
+            .bind(&id).fetch_one(&pool).await?;
+        (r.0, c.0, f.0)
+    };
+
+    // --- Validation progress ---
+    let checkpoint_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM validation_checkpoints WHERE task_id=$1"
+    ).bind(&id).fetch_one(&pool).await?;
+
+    let validation_expected = completed_runs * checkpoint_count.0;
+
+    let val_done: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM validation_results vr
+         JOIN eval_runs er ON vr.eval_run_id = er.id
+         WHERE er.task_id=$1 AND vr.status IN ('pass','fail','error')"
+    ).bind(&id).fetch_one(&pool).await?;
+
+    let val_pending: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM validation_results vr
+         JOIN eval_runs er ON vr.eval_run_id = er.id
+         WHERE er.task_id=$1 AND vr.status='pending'"
+    ).bind(&id).fetch_one(&pool).await?;
+
+    let val_pass: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM validation_results vr
+         JOIN eval_runs er ON vr.eval_run_id = er.id
+         WHERE er.task_id=$1 AND vr.status='pass'"
+    ).bind(&id).fetch_one(&pool).await?;
+
+    let val_fail: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM validation_results vr
+         JOIN eval_runs er ON vr.eval_run_id = er.id
+         WHERE er.task_id=$1 AND vr.status='fail'"
+    ).bind(&id).fetch_one(&pool).await?;
+
+    // --- Assessment progress (auto only) ---
+    let assess_done: (i64,) = sqlx::query_as(
+        "SELECT COUNT(DISTINCT ar.eval_run_id) FROM assessment_results ar
+         JOIN eval_runs er ON ar.eval_run_id = er.id
+         WHERE er.task_id=$1 AND ar.mode='auto'"
+    ).bind(&id).fetch_one(&pool).await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "inference": {
+                "total": total_runs,
+                "completed": completed_runs,
+                "failed": failed_runs
+            },
+            "validation": {
+                "checkpoint_count": checkpoint_count.0,
+                "expected": validation_expected,
+                "done": val_done.0,
+                "pending": val_pending.0,
+                "pass": val_pass.0,
+                "fail": val_fail.0
+            },
+            "assessment": {
+                "expected": completed_runs,
+                "done": assess_done.0
+            }
+        }
+    })))
+}
+
 pub async fn get_results_details(
     State(pool): State<PgPool>,
     Path(id): Path<String>,

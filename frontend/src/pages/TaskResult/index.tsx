@@ -1,22 +1,22 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import {
   Tabs, Card, Button, Space, Table, Typography, Row, Col, Statistic,
-  message, Tag, Select, Descriptions, Divider, Progress, Collapse, Alert, Tooltip, Empty,
+  message, Tag, Select, Descriptions, Divider, Progress, Collapse, Alert, Tooltip, Empty, Steps,
 } from 'antd'
 import type { ColumnType } from 'antd/es/table'
 import {
   PlayCircleOutlined, PauseCircleOutlined, CheckCircleOutlined,
   RobotOutlined, CaretRightOutlined, ArrowUpOutlined, ArrowDownOutlined,
-  QuestionCircleOutlined,
+  QuestionCircleOutlined, LoadingOutlined, SyncOutlined,
 } from '@ant-design/icons'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
 import dayjs from 'dayjs'
 import {
-  getTask, getTaskResults, listEvalRuns, listCheckpoints,
+  getTask, getTaskResults, listEvalRuns, listCheckpoints, getTaskProgress,
   executeTask, pauseTask, resumeTask, validateRuns, autoAssessRuns,
 } from '../../api/tasks'
-import type { EvalRun, RunStatus, InputMessage, CheckpointGroupStat } from '../../types'
+import type { EvalRun, RunStatus, InputMessage, CheckpointGroupStat, TaskProgress } from '../../types'
 import { TaskStatusTag, RunStatusTag } from '../../components/StatusTag'
 import EvalTypeTag from '../../components/EvalTypeTag'
 import ValidationAnnotations from '../../components/ValidationAnnotations'
@@ -289,6 +289,174 @@ function RunCard({ run }: { run: EvalRun }) {
   )
 }
 
+// ── WorkflowProgress: 3-step progress panel ──────────────────────────────────
+interface WorkflowProgressProps {
+  task: { status: string }
+  overview: { total_runs: number; completed_runs: number; failed_runs: number }
+  progress: TaskProgress
+  checkpointCount: number
+}
+
+function WorkflowProgress({ task, overview, progress, checkpointCount }: WorkflowProgressProps) {
+  const { inference, validation, assessment } = progress
+
+  // Step statuses
+  const inferenceStatus = task.status === 'completed'
+    ? 'finish'
+    : task.status === 'running'
+      ? 'process'
+      : task.status === 'paused' ? 'wait' : 'finish'
+
+  const hasCheckpoints = checkpointCount > 0
+  const validationRunning = validation.pending > 0
+  const validationDone = validation.done > 0 && validation.pending === 0
+  const validationPct = validation.expected > 0
+    ? Math.round((validation.done / validation.expected) * 100)
+    : 0
+  const validationStatus = !hasCheckpoints
+    ? 'wait'
+    : validationRunning
+      ? 'process'
+      : validationDone
+        ? 'finish'
+        : 'wait'
+
+  const assessmentRunning = assessment.done > 0 && assessment.done < assessment.expected
+  const assessmentDone = assessment.expected > 0 && assessment.done >= assessment.expected
+  const assessmentPct = assessment.expected > 0
+    ? Math.round((assessment.done / assessment.expected) * 100)
+    : 0
+  const assessmentStatus = assessmentRunning ? 'process' : assessmentDone ? 'finish' : 'wait'
+
+  // Determine which step is current (0-indexed)
+  const current =
+    inferenceStatus !== 'finish' ? 0
+    : validationStatus === 'finish' && assessmentStatus !== 'finish' ? 2
+    : validationStatus === 'finish' && assessmentStatus === 'finish' ? 3
+    : validationStatus === 'process' ? 1
+    : 1
+
+  const isPolling = validationRunning || assessmentRunning
+
+  return (
+    <Card
+      style={{ marginBottom: 16 }}
+      styles={{ body: { padding: '16px 24px' } }}
+      title={
+        <Space size={8}>
+          <Text strong>执行进度</Text>
+          {isPolling && (
+            <Tag icon={<SyncOutlined spin />} color="processing" style={{ marginRight: 0 }}>
+              更新中
+            </Tag>
+          )}
+        </Space>
+      }
+    >
+      <Steps
+        current={current}
+        size="small"
+        items={[
+          {
+            title: '推理执行',
+            status: inferenceStatus as 'finish' | 'process' | 'wait' | 'error',
+            description: (
+              <div style={{ minWidth: 140 }}>
+                {task.status === 'running' ? (
+                  <>
+                    <div>
+                      <Progress
+                        percent={overview.total_runs > 0 ? Math.round((inference.completed / inference.total) * 100) : 0}
+                        size="small"
+                        strokeColor="#1677ff"
+                        style={{ margin: 0 }}
+                      />
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {inference.completed} / {inference.total} 条完成
+                    </Text>
+                  </>
+                ) : task.status === 'completed' ? (
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    {overview.completed_runs} 条全部完成
+                    {overview.failed_runs > 0 && (
+                      <Text type="danger" style={{ fontSize: 11 }}> ({overview.failed_runs} 失败)</Text>
+                    )}
+                  </Text>
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 11 }}>尚未开始</Text>
+                )}
+              </div>
+            ),
+          },
+          {
+            title: '验证校验',
+            status: validationStatus as 'finish' | 'process' | 'wait' | 'error',
+            description: (
+              <div style={{ minWidth: 160 }}>
+                {!hasCheckpoints ? (
+                  <Text type="secondary" style={{ fontSize: 11 }}>未配置检查点</Text>
+                ) : validationRunning ? (
+                  <>
+                    <Progress
+                      percent={validationPct}
+                      size="small"
+                      strokeColor="#722ed1"
+                      style={{ margin: 0 }}
+                    />
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {validation.done} / {validation.expected} 条完成
+                      {validation.pending > 0 && (
+                        <> · <LoadingOutlined style={{ fontSize: 10 }} /> {validation.pending} 待处理</>
+                      )}
+                    </Text>
+                  </>
+                ) : validationDone ? (
+                  <Space size={4} style={{ flexWrap: 'wrap' as const }}>
+                    <Text style={{ fontSize: 11, color: '#52c41a' }}>✓ {validation.pass} 通过</Text>
+                    {validation.fail > 0 && (
+                      <Text style={{ fontSize: 11, color: '#ff4d4f' }}>✗ {validation.fail} 未通过</Text>
+                    )}
+                  </Space>
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    {checkpointCount} 个检查点，待运行
+                  </Text>
+                )}
+              </div>
+            ),
+          },
+          {
+            title: '评估打分',
+            status: assessmentStatus as 'finish' | 'process' | 'wait' | 'error',
+            description: (
+              <div style={{ minWidth: 140 }}>
+                {assessmentRunning ? (
+                  <>
+                    <Progress
+                      percent={assessmentPct}
+                      size="small"
+                      strokeColor="#fa8c16"
+                      style={{ margin: 0 }}
+                    />
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {assessment.done} / {assessment.expected} 条完成
+                    </Text>
+                  </>
+                ) : assessmentDone ? (
+                  <Text style={{ fontSize: 11, color: '#52c41a' }}>✓ {assessment.done} 条已评分</Text>
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 11 }}>待运行</Text>
+                )}
+              </div>
+            ),
+          },
+        ]}
+      />
+    </Card>
+  )
+}
+
 // ── PivotTable: checkpoint × prompt/model comparison matrix ──────────────────
 type PivotCell = { pass_count: number; eval_count: number; pass_rate: number | null }
 type PivotRow = { key: string; checkpoint_name: string; criterion: string } & Record<string, PivotCell | string>
@@ -449,17 +617,50 @@ export default function TaskResultPage() {
     queryFn: () => listCheckpoints(taskId),
   })
 
+  // Progress polling — determines whether validation/assessment is in-flight
+  const [progressPolling, setProgressPolling] = useState(false)
+  const { data: progress, dataUpdatedAt: progressUpdatedAt } = useQuery({
+    queryKey: ['task-progress', taskId],
+    queryFn: () => getTaskProgress(taskId),
+    refetchInterval: progressPolling ? 2000 : false,
+  })
+
+  // Auto-detect in-flight work on mount and data refresh
+  useEffect(() => {
+    if (!progress) return
+    const validationRunning = progress.validation.pending > 0
+    const assessmentRunning =
+      progress.assessment.expected > 0 &&
+      progress.assessment.done > 0 &&
+      progress.assessment.done < progress.assessment.expected
+    const inferenceRunning = task?.status === 'running' || task?.status === 'paused'
+    setProgressPolling(validationRunning || assessmentRunning || !!inferenceRunning)
+  }, [progress, task?.status])
+
+  // When polling detects completion, refresh main data
+  const prevProgressRef = { val: progress }
+  useEffect(() => {
+    if (!progress) return
+    // Validation just finished (had pending, now 0)
+    if (prevProgressRef.val?.validation.pending === 0 && progress.validation.pending === 0) return
+    if (progress.validation.pending === 0 && progress.validation.done > 0) {
+      invalidate()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progressUpdatedAt])
+
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['task', taskId] })
     queryClient.invalidateQueries({ queryKey: ['task-results', taskId] })
     queryClient.invalidateQueries({ queryKey: ['eval-runs', taskId] })
+    queryClient.invalidateQueries({ queryKey: ['task-progress', taskId] })
   }
 
-  const executeMutation = useMutation({ mutationFn: () => executeTask(taskId), onSuccess: () => { message.success('任务已开始执行'); invalidate() } })
+  const executeMutation = useMutation({ mutationFn: () => executeTask(taskId), onSuccess: () => { message.success('任务已开始执行'); setProgressPolling(true); invalidate() } })
   const pauseMutation = useMutation({ mutationFn: () => pauseTask(taskId), onSuccess: () => { message.success('任务已暂停'); invalidate() } })
-  const resumeMutation = useMutation({ mutationFn: () => resumeTask(taskId), onSuccess: () => { message.success('任务已恢复'); invalidate() } })
-  const validateMutation = useMutation({ mutationFn: () => validateRuns(taskId), onSuccess: () => { message.success('校验任务已启动'); invalidate() } })
-  const assessMutation = useMutation({ mutationFn: () => autoAssessRuns(taskId), onSuccess: () => { message.success('自动评估已启动'); invalidate() } })
+  const resumeMutation = useMutation({ mutationFn: () => resumeTask(taskId), onSuccess: () => { message.success('任务已恢复'); setProgressPolling(true); invalidate() } })
+  const validateMutation = useMutation({ mutationFn: () => validateRuns(taskId), onSuccess: () => { message.success('校验任务已启动'); setProgressPolling(true); invalidate() } })
+  const assessMutation = useMutation({ mutationFn: () => autoAssessRuns(taskId), onSuccess: () => { message.success('自动评估已启动'); setProgressPolling(true); invalidate() } })
 
   // Client-side filter (backend ignores query params)
   const filteredRuns = useMemo(() => {
@@ -593,6 +794,11 @@ export default function TaskResultPage() {
 
       {overview && (
         <>
+          {/* ── Workflow progress steps ───────────────────────────── */}
+          {(task?.status === 'completed' || task?.status === 'paused' || task?.status === 'running') && progress && (
+            <WorkflowProgress task={task} overview={overview} progress={progress} checkpointCount={checkpoints.length} />
+          )}
+
           <Row gutter={16} style={{ marginBottom: 16 }}>
             <Col xs={12} sm={6}><Card><Statistic title="总运行数" value={overview.total_runs} /></Card></Col>
             <Col xs={12} sm={6}>

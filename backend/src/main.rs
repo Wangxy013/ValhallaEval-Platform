@@ -126,6 +126,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/tasks/:id/results/details",
             get(routes::tasks::get_results_details),
         )
+        .route(
+            "/api/v1/tasks/:id/progress",
+            get(routes::tasks::get_task_progress),
+        )
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(pool);

@@ -1,5 +1,5 @@
 import client from './client'
-import type { Task, EvalRun, TaskResultsOverview, ValidationCheckpoint } from '../types'
+import type { Task, EvalRun, TaskResultsOverview, ValidationCheckpoint, TaskProgress } from '../types'
 
 export interface CreateTaskPayload {
   name: string;
@@ -89,6 +89,11 @@ export async function autoAssessRuns(taskId: string): Promise<void> {
 
 export async function listCheckpoints(taskId: string): Promise<ValidationCheckpoint[]> {
   const res = await client.get(`/tasks/${taskId}/checkpoints`)
+  return res.data
+}
+
+export async function getTaskProgress(taskId: string): Promise<TaskProgress> {
+  const res = await client.get(`/tasks/${taskId}/progress`)
   return res.data
 }
 
