@@ -24,6 +24,8 @@
 - [验证校验](#验证校验)
 - [评估](#评估)
 - [结果查询](#结果查询)
+- [进度查询](#进度查询)
+- [结果查询](#结果查询)
 
 ---
 
@@ -457,3 +459,56 @@ GET /api/v1/tasks/:id/results/overview
 ```
 
 `by_checkpoint_prompt` / `by_checkpoint_model` 是用于渲染对比矩阵的扁平数组，前端按 `checkpoint_name` 和 `group_label` 聚合为透视表。
+
+---
+
+## 进度查询
+
+### 获取任务执行进度
+
+```
+GET /api/v1/tasks/:id/progress
+```
+
+轻量级接口，返回三个阶段的实时计数，用于前端进度轮询（建议间隔 2s）。
+
+**响应 `data`**
+
+```json
+{
+  "inference": {
+    "total": 6,
+    "completed": 6,
+    "failed": 0
+  },
+  "validation": {
+    "checkpoint_count": 2,
+    "expected": 12,
+    "done": 12,
+    "pending": 0,
+    "pass": 11,
+    "fail": 1
+  },
+  "assessment": {
+    "expected": 6,
+    "done": 6
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `validation.expected` | `completed_runs × checkpoint_count` |
+| `validation.done` | status IN ('pass','fail','error') 的记录数 |
+| `validation.pending` | status='pending' 的记录数（>0 表示校验进行中） |
+| `assessment.done` | 已完成自动评估的 eval_run 数（按 mode='auto' 去重） |
+
+---
+
+## 创建任务新增字段
+
+`POST /api/v1/tasks` 的请求体新增以下字段（可选）：
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `concurrency` | number | 3 | 三个阶段同时发起的最大 LLM 请求数，范围 1-20，建议 3-5 |

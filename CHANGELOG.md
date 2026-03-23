@@ -6,6 +6,81 @@
 
 ---
 
+## [0.5.0] - 2026-03-23
+
+### 新增
+
+- **并发执行**：三个阶段（推理执行、验证校验、自动评估）均改为基于 `Semaphore + JoinSet` 的并发模式，告别串行等待
+- **可配置并发数**：新建任务第 4 步新增「并发数」输入（1-20，默认 3），三个阶段共用同一并发限制
+- **预创建执行记录**：推理阶段在发起 LLM 调用前预先创建所有 `eval_run` 记录（状态 pending），进度面板立即可见全量进度
+- **DB 迁移**：`tasks` 表新增 `concurrency` 列（`BIGINT NOT NULL DEFAULT 3`）
+- **任务信息展示**：结果页总览卡片新增「执行并发数」字段
+
+---
+
+## [0.4.0] - 2026-03-23
+
+### 新增
+
+- **三阶段进度面板**：总览页新增「执行进度」Steps 卡片（推理执行→验证校验→评估打分），每阶段显示实时进度条和计数
+- **自动轮询**：有操作进行中时前端自动 2s 轮询 `/progress` 接口，操作完成后自动刷新结果数据
+- **进度感知按钮**：点击「运行校验」或「自动评估」后立即开启轮询，页面刷新后也能自动检测进行中的操作
+- 新增 `GET /tasks/:id/progress` 接口（推理/校验/评估各阶段计数）
+
+### 修复
+
+- **关键修复**：`validation_results` 表字段混用——所有统计查询使用 `result`（存 LLM 完整文本）而非 `status`（存 pass/fail 枚举）过滤，导致所有通过率为 0。已全部改为 `vr.status`
+- `get_task_runs` 返回的 enriched JSON：`result` 字段现映射 `vr.status`（枚举），`comment` 字段映射 `vr.result`（LLM 解释文本）
+
+---
+
+## [0.3.0] - 2026-03-23
+
+### 修复（端到端验证发现）
+
+- **关键修复**：`CreateTask` 结构体新增 `validation_checkpoints` 和 `test_item_ids` 字段，此前检查点和测试数据选择被后端静默丢弃
+- **测试数据选择**：`execute_task` 改为使用任务创建时快照的 `task_test_items`
+- **输入校验**：`create_task` 增加 `eval_type` 枚举校验、任务名非空校验、model/prompt ID 存在性校验
+- **引用保护**：`delete_model` 被任务引用时返回 409
+- **404 一致性**：`/runs` 和 `/results/overview` 对不存在任务返回 404
+- **检查点排序**：POST checkpoint 自动计算 `order_index`（max+1）
+- **JSON 错误格式统一**：新增 `AppJson<T>` 处理 422 错误
+
+### 新增
+
+- 完整体系化文档（README、架构、API 参考、开发/部署指南、用户手册共 13 个文件）
+
+---
+
+## [0.2.0] - 2026-03-23
+
+### 新增
+
+- 验证点对比矩阵（透视表 + delta 标签）
+- 明细页按测试数据分组 + 差异高亮
+- 检查点感知自动评估（checkpoint_scores）
+- 总览空状态引导、按钮 tooltip 说明
+
+---
+
+## [0.1.0] - 2026-03-20
+
+### 新增
+
+- 完整项目骨架（Rust+Axum 后端 + React+TypeScript 前端）
+- 模型/Prompt/测试数据/任务 CRUD
+- 任务执行（批量推理，暂停/继续）
+- 验证校验（LLM 裁判按检查点判断 PASS/FAIL）
+- 三种评估模式（人工/自动/自定义）
+- 结果总览与明细对比
+
+
+所有重要变更都会记录在本文件中。
+
+格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
+
+---
+
 ## [0.3.0] - 2026-03-23
 
 ### 修复（端到端验证发现）
