@@ -691,7 +691,12 @@ pub async fn get_task_runs(
         .await
         .unwrap_or_default();
 
-        // Get validation results enriched with checkpoint name and criterion
+        // Get validation results enriched with checkpoint name and criterion.
+        // NOTE: DB column mapping:
+        //   status  → 'pass' | 'fail' | 'pending' | 'error'  (the enum decision)
+        //   result  → full LLM judge response text ("PASS. The output...")
+        //   comment → unused / null
+        // Frontend expects: result = enum, comment = explanation text — so we swap here.
         let raw_vr = sqlx::query_as::<_, ValidationResult>(
             "SELECT id, eval_run_id, checkpoint_id, status, result, annotations, comment, created_at FROM validation_results WHERE eval_run_id = $1 ORDER BY created_at ASC"
         )
@@ -710,9 +715,11 @@ pub async fn get_task_runs(
                 "checkpoint_name": cp_name,
                 "checkpoint_criterion": cp_criterion,
                 "status": vr.status,
-                "result": vr.result,
+                // result field carries the pass/fail enum so the frontend can use it for colour/text
+                "result": vr.status,
+                // comment carries the full LLM explanation (stored in the DB `result` column)
+                "comment": vr.result,
                 "annotations": vr.annotations,
-                "comment": vr.comment,
                 "created_at": vr.created_at,
             })
         }).collect();
@@ -1218,11 +1225,11 @@ pub async fn get_results_overview(
     ).bind(&id).fetch_one(&pool).await?;
 
     let validation_pass: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM validation_results vr JOIN eval_runs er ON vr.eval_run_id=er.id WHERE er.task_id=$1 AND vr.result='pass'"
+        "SELECT COUNT(*) FROM validation_results vr JOIN eval_runs er ON vr.eval_run_id=er.id WHERE er.task_id=$1 AND vr.status='pass'"
     ).bind(&id).fetch_one(&pool).await?;
 
     let validation_fail: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM validation_results vr JOIN eval_runs er ON vr.eval_run_id=er.id WHERE er.task_id=$1 AND vr.result='fail'"
+        "SELECT COUNT(*) FROM validation_results vr JOIN eval_runs er ON vr.eval_run_id=er.id WHERE er.task_id=$1 AND vr.status='fail'"
     ).bind(&id).fetch_one(&pool).await?;
 
     let avg_score: (Option<f64>,) = sqlx::query_as(
@@ -1244,10 +1251,10 @@ pub async fn get_results_overview(
             (SELECT COUNT(*) FROM eval_runs WHERE task_prompt_id = tp.id AND status='completed') as completed,
             (SELECT COUNT(*) FROM validation_results vr2
                JOIN eval_runs er2 ON vr2.eval_run_id = er2.id
-               WHERE er2.task_prompt_id = tp.id AND vr2.result='pass') as pass_count,
+               WHERE er2.task_prompt_id = tp.id AND vr2.status='pass') as pass_count,
             (SELECT COUNT(*) FROM validation_results vr3
                JOIN eval_runs er3 ON vr3.eval_run_id = er3.id
-               WHERE er3.task_prompt_id = tp.id) as validation_total,
+               WHERE er3.task_prompt_id = tp.id AND vr3.status IN ('pass', 'fail')) as validation_total,
             (SELECT AVG(ar.score) FROM assessment_results ar
                JOIN eval_runs er ON ar.eval_run_id = er.id
                WHERE er.task_prompt_id = tp.id) as avg_score
@@ -1299,10 +1306,10 @@ pub async fn get_results_overview(
             (SELECT COUNT(*) FROM eval_runs WHERE task_model_id = tm.id AND status='completed') as completed,
             (SELECT COUNT(*) FROM validation_results vr2
                JOIN eval_runs er2 ON vr2.eval_run_id = er2.id
-               WHERE er2.task_model_id = tm.id AND vr2.result='pass') as pass_count,
+               WHERE er2.task_model_id = tm.id AND vr2.status='pass') as pass_count,
             (SELECT COUNT(*) FROM validation_results vr3
                JOIN eval_runs er3 ON vr3.eval_run_id = er3.id
-               WHERE er3.task_model_id = tm.id) as validation_total,
+               WHERE er3.task_model_id = tm.id AND vr3.status IN ('pass', 'fail')) as validation_total,
             (SELECT AVG(ar.score) FROM assessment_results ar
                JOIN eval_runs er ON ar.eval_run_id = er.id
                WHERE er.task_model_id = tm.id) as avg_score
@@ -1343,10 +1350,10 @@ pub async fn get_results_overview(
         "SELECT vc.id, vc.name, vc.criterion, vc.order_index,
             COALESCE((SELECT COUNT(*) FROM validation_results vr
                JOIN eval_runs er ON vr.eval_run_id = er.id
-               WHERE er.task_id = $1 AND vr.checkpoint_id = vc.id AND vr.result = 'pass'), 0) as pass_count,
+               WHERE er.task_id = $1 AND vr.checkpoint_id = vc.id AND vr.status = 'pass'), 0) as pass_count,
             COALESCE((SELECT COUNT(*) FROM validation_results vr
                JOIN eval_runs er ON vr.eval_run_id = er.id
-               WHERE er.task_id = $1 AND vr.checkpoint_id = vc.id AND (vr.result = 'pass' OR vr.result = 'fail')), 0) as eval_count
+               WHERE er.task_id = $1 AND vr.checkpoint_id = vc.id AND (vr.status = 'pass' OR vr.status = 'fail')), 0) as eval_count
          FROM validation_checkpoints vc
          WHERE vc.task_id = $1
          ORDER BY vc.order_index ASC"
@@ -1377,8 +1384,8 @@ pub async fn get_results_overview(
         "SELECT vc.id as cp_id, vc.name as cp_name, vc.criterion, vc.order_index,
                 tp.id as tp_id,
                 COALESCE(tp.label, p.name || ' (' || p.version || ')') as group_label,
-                COUNT(CASE WHEN vr.result = 'pass' THEN 1 END) as pass_count,
-                COUNT(CASE WHEN vr.result IN ('pass', 'fail') THEN 1 END) as eval_count
+                COUNT(CASE WHEN vr.status = 'pass' THEN 1 END) as pass_count,
+                COUNT(CASE WHEN vr.status IN ('pass', 'fail') THEN 1 END) as eval_count
          FROM validation_checkpoints vc
          CROSS JOIN task_prompts tp
          LEFT JOIN prompts p ON p.id = tp.prompt_id
@@ -1407,8 +1414,8 @@ pub async fn get_results_overview(
         "SELECT vc.id as cp_id, vc.name as cp_name, vc.criterion, vc.order_index,
                 tm.id as tm_id,
                 COALESCE(tm.label, mc.name) as group_label,
-                COUNT(CASE WHEN vr.result = 'pass' THEN 1 END) as pass_count,
-                COUNT(CASE WHEN vr.result IN ('pass', 'fail') THEN 1 END) as eval_count
+                COUNT(CASE WHEN vr.status = 'pass' THEN 1 END) as pass_count,
+                COUNT(CASE WHEN vr.status IN ('pass', 'fail') THEN 1 END) as eval_count
          FROM validation_checkpoints vc
          CROSS JOIN task_models tm
          LEFT JOIN model_configs mc ON mc.id = tm.model_config_id
