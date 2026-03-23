@@ -54,6 +54,7 @@ export interface Task {
   assessment_mode: AssessmentMode;
   assessment_config?: Record<string, unknown>;
   repeat_count: number;
+  concurrency: number;
   prompts?: TaskPrompt[];
   models?: TaskModel[];
   test_items?: TaskTestItem[];

@@ -10,6 +10,7 @@ export interface CreateTaskPayload {
   prompt_ids: string[];
   test_item_ids?: string[];
   repeat_count: number;
+  concurrency?: number;
   assessment_mode: string;
   assessment_config?: Record<string, unknown>;
   validation_checkpoints?: Array<{ name: string; criterion: string }>;

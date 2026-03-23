@@ -18,7 +18,7 @@ use crate::models::{
 
 pub async fn list_tasks(State(pool): State<PgPool>) -> AppResult<Json<Value>> {
     let tasks = sqlx::query_as::<_, Task>(
-        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, created_at, updated_at, started_at, completed_at FROM tasks ORDER BY created_at DESC"
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks ORDER BY created_at DESC"
     )
     .fetch_all(&pool)
     .await?;
@@ -73,9 +73,10 @@ pub async fn create_task(
     let assessment_config = payload.assessment_config.as_ref().map(|v| v.to_string());
     let assessment_mode = payload.assessment_mode.unwrap_or_else(|| "manual".to_string());
     let repeat_count = payload.repeat_count.unwrap_or(1);
+    let concurrency = payload.concurrency.unwrap_or(3).max(1).min(20);
 
     sqlx::query(
-        "INSERT INTO tasks (id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, created_at, updated_at) VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9, $10, $11)"
+        "INSERT INTO tasks (id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at) VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9, $10, $11, $12)"
     )
     .bind(&id)
     .bind(&payload.name)
@@ -86,6 +87,7 @@ pub async fn create_task(
     .bind(&assessment_mode)
     .bind(&assessment_config)
     .bind(repeat_count)
+    .bind(concurrency)
     .bind(now)
     .bind(now)
     .execute(&pool)
@@ -179,7 +181,7 @@ pub async fn get_task(
 
 async fn get_task_with_associations(pool: &PgPool, id: &str) -> AppResult<Value> {
     let task = sqlx::query_as::<_, Task>(
-        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(pool)
@@ -221,7 +223,7 @@ pub async fn update_task(
     AppJson(payload): AppJson<UpdateTask>,
 ) -> AppResult<Json<Value>> {
     let existing = sqlx::query_as::<_, Task>(
-        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
     )
     .bind(&id)
     .fetch_optional(&pool)
@@ -319,7 +321,7 @@ pub async fn execute_task(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     let task = sqlx::query_as::<_, Task>(
-        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
     )
     .bind(&id)
     .fetch_optional(&pool)
@@ -436,9 +438,15 @@ pub async fn execute_task(
     let pool_clone = pool.clone();
     let task_id = id.clone();
     let repeat_count = task.repeat_count;
+    let concurrency = task.concurrency.max(1).min(20) as usize;
 
     tokio::spawn(async move {
-        let llm_client = LlmClient::new();
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+        use tokio::task::JoinSet;
+
+        let llm_client = Arc::new(LlmClient::new());
+        let semaphore = Arc::new(Semaphore::new(concurrency));
 
         let prompt_entries: Vec<Option<(String, String)>> = if task_prompts.is_empty() {
             vec![None]
@@ -453,110 +461,108 @@ pub async fn execute_task(
                 .collect()
         };
 
+        // Pre-create all eval_run records so progress is visible immediately
+        let mut work_units: Vec<(String, String, String, Option<String>, Option<String>, Vec<InputMessage>, i64)> = Vec::new();
         for (tti_id, item_content) in &task_test_item_ids {
             for tm in &task_models {
                 let model_cfg = match model_map.get(&tm.id) {
                     Some(c) => c,
                     None => continue,
                 };
-
                 for prompt_entry in &prompt_entries {
                     for repeat_idx in 0..repeat_count {
-                        let run_id = Uuid::new_v4().to_string();
-                        let created_at = Utc::now().timestamp();
-
                         let mut messages: Vec<InputMessage> = Vec::new();
                         let task_prompt_id: Option<String>;
 
                         if let Some((tp_id, prompt_content)) = prompt_entry {
-                            messages.push(InputMessage {
-                                role: "system".to_string(),
-                                content: prompt_content.clone(),
-                            });
+                            messages.push(InputMessage { role: "system".to_string(), content: prompt_content.clone() });
                             task_prompt_id = Some(tp_id.clone());
                         } else {
                             task_prompt_id = None;
                         }
+                        messages.push(InputMessage { role: "user".to_string(), content: item_content.clone() });
 
-                        messages.push(InputMessage {
-                            role: "user".to_string(),
-                            content: item_content.clone(),
-                        });
-
-                        let input_messages_json = serde_json::to_string(&messages)
-                            .unwrap_or_else(|_| "[]".to_string());
-
+                        let run_id = Uuid::new_v4().to_string();
+                        let input_json = serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string());
                         let _ = sqlx::query(
                             "INSERT INTO eval_runs (id, task_id, task_prompt_id, task_model_id, task_test_item_id, repeat_index, status, input_messages, created_at) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)"
                         )
-                        .bind(&run_id)
-                        .bind(&task_id)
-                        .bind(&task_prompt_id)
-                        .bind(&tm.id)
-                        .bind(tti_id)
-                        .bind(repeat_idx)
-                        .bind(&input_messages_json)
-                        .bind(created_at)
-                        .execute(&pool_clone)
-                        .await;
+                        .bind(&run_id).bind(&task_id).bind(&task_prompt_id)
+                        .bind(&tm.id).bind(tti_id).bind(repeat_idx)
+                        .bind(&input_json).bind(Utc::now().timestamp())
+                        .execute(&pool_clone).await;
 
-                        let _ = sqlx::query("UPDATE eval_runs SET status='running' WHERE id=$1")
-                            .bind(&run_id)
-                            .execute(&pool_clone)
-                            .await;
-
-                        let start = std::time::Instant::now();
-                        let result = llm_client
-                            .call(
-                                &model_cfg.api_url,
-                                &model_cfg.api_key,
-                                &model_cfg.model_id,
-                                messages,
-                            )
-                            .await;
-
-                        let duration_ms = start.elapsed().as_millis() as i64;
-                        let completed_at = Utc::now().timestamp();
-
-                        match result {
-                            Ok(llm_result) => {
-                                let _ = sqlx::query(
-                                    "UPDATE eval_runs SET status='completed', output_content=$1, tokens_used=$2, duration_ms=$3, completed_at=$4 WHERE id=$5"
-                                )
-                                .bind(&llm_result.content)
-                                .bind(llm_result.tokens_used)
-                                .bind(duration_ms)
-                                .bind(completed_at)
-                                .bind(&run_id)
-                                .execute(&pool_clone)
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ = sqlx::query(
-                                    "UPDATE eval_runs SET status='failed', error_message=$1, duration_ms=$2, completed_at=$3 WHERE id=$4"
-                                )
-                                .bind(&e)
-                                .bind(duration_ms)
-                                .bind(completed_at)
-                                .bind(&run_id)
-                                .execute(&pool_clone)
-                                .await;
-                            }
-                        }
+                        // (run_id, task_model_id, api_url, api_key, model_id_str, messages, repeat_idx)
+                        work_units.push((
+                            run_id,
+                            tm.id.clone(),
+                            model_cfg.api_url.clone(),
+                            Some(model_cfg.api_key.clone()),
+                            Some(model_cfg.model_id.clone()),
+                            messages,
+                            repeat_idx,
+                        ));
                     }
                 }
             }
         }
 
-        let completed_at = Utc::now().timestamp();
-        let _ = sqlx::query(
-            "UPDATE tasks SET status='completed', completed_at=$1, updated_at=$2 WHERE id=$3"
-        )
-        .bind(completed_at)
-        .bind(completed_at)
-        .bind(&task_id)
-        .execute(&pool_clone)
-        .await;
+        // Execute all runs concurrently, limited by semaphore
+        let mut join_set: JoinSet<()> = JoinSet::new();
+        for (run_id, _tm_id, api_url, api_key, model_id_str, messages, _repeat_idx) in work_units {
+            let sem = semaphore.clone();
+            let pool = pool_clone.clone();
+            let client = llm_client.clone();
+            let task_id_c = task_id.clone();
+            let api_key = api_key.unwrap_or_default();
+            let model_id_str = model_id_str.unwrap_or_default();
+
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+
+                // Respect pause: skip if task is no longer running
+                let status: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id=$1")
+                    .bind(&task_id_c).fetch_one(&pool).await.unwrap_or(("failed".to_string(),));
+                if status.0 != "running" {
+                    return;
+                }
+
+                let _ = sqlx::query("UPDATE eval_runs SET status='running' WHERE id=$1")
+                    .bind(&run_id).execute(&pool).await;
+
+                let start = std::time::Instant::now();
+                let result = client.call(&api_url, &api_key, &model_id_str, messages).await;
+                let duration_ms = start.elapsed().as_millis() as i64;
+                let completed_at = Utc::now().timestamp();
+
+                match result {
+                    Ok(r) => {
+                        let _ = sqlx::query(
+                            "UPDATE eval_runs SET status='completed', output_content=$1, tokens_used=$2, duration_ms=$3, completed_at=$4 WHERE id=$5"
+                        ).bind(&r.content).bind(r.tokens_used).bind(duration_ms).bind(completed_at).bind(&run_id)
+                        .execute(&pool).await;
+                    }
+                    Err(e) => {
+                        let _ = sqlx::query(
+                            "UPDATE eval_runs SET status='failed', error_message=$1, duration_ms=$2, completed_at=$3 WHERE id=$4"
+                        ).bind(&e).bind(duration_ms).bind(completed_at).bind(&run_id)
+                        .execute(&pool).await;
+                    }
+                }
+            });
+        }
+
+        while join_set.join_next().await.is_some() {}
+
+        // Only mark completed if still in running state (not paused)
+        let final_status: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id=$1")
+            .bind(&task_id).fetch_one(&pool_clone).await.unwrap_or(("failed".to_string(),));
+        if final_status.0 == "running" {
+            let ts = Utc::now().timestamp();
+            let _ = sqlx::query(
+                "UPDATE tasks SET status='completed', completed_at=$1, updated_at=$2 WHERE id=$3"
+            ).bind(ts).bind(ts).bind(&task_id).execute(&pool_clone).await;
+        }
     });
 
     Ok(Json(json!({ "success": true, "data": { "status": "running", "task_id": id } })))
@@ -899,88 +905,90 @@ pub async fn validate_task(
 
     let pool_clone = pool.clone();
 
+    // Get task concurrency setting
+    let concurrency: (i64,) = sqlx::query_as("SELECT concurrency FROM tasks WHERE id=$1")
+        .bind(&id).fetch_one(&pool).await.unwrap_or((3,));
+    let concurrency = concurrency.0.max(1).min(20) as usize;
+
     tokio::spawn(async move {
-        let llm_client = LlmClient::new();
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+        use tokio::task::JoinSet;
 
+        let llm_client = Arc::new(LlmClient::new());
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let judge_model = Arc::new(judge_model);
+
+        // Pre-insert all pending validation_results (only for pairs not already done)
+        let mut work_units: Vec<(String, String, String)> = Vec::new(); // (vr_id, run_id, cp_id)
         for run in &completed_runs {
-            let output = match &run.output_content {
-                Some(o) => o.clone(),
-                None => continue,
-            };
-
+            if run.output_content.is_none() { continue; }
             for checkpoint in &checkpoints {
-                let vr_id = Uuid::new_v4().to_string();
-                let created_at = Utc::now().timestamp();
-
                 let exists: (i64,) = sqlx::query_as(
                     "SELECT COUNT(*) FROM validation_results WHERE eval_run_id=$1 AND checkpoint_id=$2"
                 )
-                .bind(&run.id)
-                .bind(&checkpoint.id)
-                .fetch_one(&pool_clone)
-                .await
-                .unwrap_or((0,));
+                .bind(&run.id).bind(&checkpoint.id)
+                .fetch_one(&pool_clone).await.unwrap_or((0,));
+                if exists.0 > 0 { continue; }
 
-                if exists.0 > 0 {
-                    continue;
-                }
-
+                let vr_id = Uuid::new_v4().to_string();
                 let _ = sqlx::query(
                     "INSERT INTO validation_results (id, eval_run_id, checkpoint_id, status, created_at) VALUES ($1, $2, $3, 'pending', $4)"
                 )
-                .bind(&vr_id)
-                .bind(&run.id)
-                .bind(&checkpoint.id)
-                .bind(created_at)
-                .execute(&pool_clone)
-                .await;
+                .bind(&vr_id).bind(&run.id).bind(&checkpoint.id).bind(Utc::now().timestamp())
+                .execute(&pool_clone).await;
+                work_units.push((vr_id, run.id.clone(), checkpoint.id.clone()));
+            }
+        }
+
+        // Build a lookup map: checkpoint_id -> (criterion, name)
+        let cp_map: std::collections::HashMap<String, (String, String)> = checkpoints
+            .iter().map(|c| (c.id.clone(), (c.criterion.clone(), c.name.clone()))).collect();
+        // Build run output map
+        let run_output_map: std::collections::HashMap<String, String> = completed_runs
+            .iter().filter_map(|r| r.output_content.as_ref().map(|o| (r.id.clone(), o.clone()))).collect();
+
+        // Execute all validation calls concurrently
+        let mut join_set: JoinSet<()> = JoinSet::new();
+        for (vr_id, run_id, cp_id) in work_units {
+            let output = match run_output_map.get(&run_id) {
+                Some(o) => o.clone(),
+                None => continue,
+            };
+            let (criterion, _) = match cp_map.get(&cp_id) {
+                Some(c) => c.clone(),
+                None => continue,
+            };
+            let sem = semaphore.clone();
+            let pool = pool_clone.clone();
+            let client = llm_client.clone();
+            let jm = judge_model.clone();
+
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
 
                 let validation_prompt = format!(
                     "You are evaluating an AI model's output against a specific criterion.\n\nCriterion: {}\n\nModel Output:\n{}\n\nDoes the output satisfy the criterion? Respond with PASS or FAIL followed by a brief explanation.",
-                    checkpoint.criterion, output
+                    criterion, output
                 );
+                let messages = vec![InputMessage { role: "user".to_string(), content: validation_prompt }];
 
-                let messages = vec![InputMessage {
-                    role: "user".to_string(),
-                    content: validation_prompt,
-                }];
-
-                match llm_client
-                    .call(
-                        &judge_model.api_url,
-                        &judge_model.api_key,
-                        &judge_model.model_id,
-                        messages,
-                    )
-                    .await
-                {
+                match client.call(&jm.api_url, &jm.api_key, &jm.model_id, messages).await {
                     Ok(result) => {
-                        let validation_status = if result.content.to_uppercase().starts_with("PASS") {
-                            "pass"
-                        } else {
-                            "fail"
-                        };
-                        let _ = sqlx::query(
-                            "UPDATE validation_results SET status=$1, result=$2 WHERE id=$3"
-                        )
-                        .bind(validation_status)
-                        .bind(&result.content)
-                        .bind(&vr_id)
-                        .execute(&pool_clone)
-                        .await;
+                        let status = if result.content.to_uppercase().starts_with("PASS") { "pass" } else { "fail" };
+                        let _ = sqlx::query("UPDATE validation_results SET status=$1, result=$2 WHERE id=$3")
+                            .bind(status).bind(&result.content).bind(&vr_id)
+                            .execute(&pool).await;
                     }
                     Err(e) => {
-                        let _ = sqlx::query(
-                            "UPDATE validation_results SET status='error', result=$1 WHERE id=$2"
-                        )
-                        .bind(&e)
-                        .bind(&vr_id)
-                        .execute(&pool_clone)
-                        .await;
+                        let _ = sqlx::query("UPDATE validation_results SET status='error', result=$1 WHERE id=$2")
+                            .bind(&e).bind(&vr_id).execute(&pool).await;
                     }
                 }
-            }
+            });
         }
+
+        while join_set.join_next().await.is_some() {}
     });
 
     Ok(Json(json!({ "success": true, "data": { "message": "Validation started" } })))
@@ -1074,6 +1082,11 @@ pub async fn auto_assess_task(
     .await?
     .ok_or_else(|| AppError::BadRequest("Judge model config not found".to_string()))?;
 
+    // Get task concurrency setting
+    let concurrency_setting: (i64,) = sqlx::query_as("SELECT concurrency FROM tasks WHERE id=$1")
+        .bind(&id).fetch_one(&pool).await.unwrap_or((3,));
+    let concurrency = concurrency_setting.0.max(1).min(20) as usize;
+
     let pool_clone = pool.clone();
 
     // Fetch checkpoints to make assessment criterion-aware
@@ -1086,9 +1099,18 @@ pub async fn auto_assess_task(
     .unwrap_or_default();
 
     tokio::spawn(async move {
-        let llm_client = LlmClient::new();
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+        use tokio::task::JoinSet;
 
-        for run in &completed_runs {
+        let llm_client = Arc::new(LlmClient::new());
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let judge_model = Arc::new(judge_model);
+        let assess_checkpoints = Arc::new(assess_checkpoints);
+
+        let mut join_set: JoinSet<()> = JoinSet::new();
+
+        for run in completed_runs {
             let output = match &run.output_content {
                 Some(o) => o.clone(),
                 None => continue,
@@ -1097,87 +1119,65 @@ pub async fn auto_assess_task(
             let existing: (i64,) = sqlx::query_as(
                 "SELECT COUNT(*) FROM assessment_results WHERE eval_run_id=$1 AND mode='auto'"
             )
-            .bind(&run.id)
-            .fetch_one(&pool_clone)
-            .await
-            .unwrap_or((0,));
+            .bind(&run.id).fetch_one(&pool_clone).await.unwrap_or((0,));
+            if existing.0 > 0 { continue; }
 
-            if existing.0 > 0 {
-                continue;
-            }
+            let sem = semaphore.clone();
+            let pool = pool_clone.clone();
+            let client = llm_client.clone();
+            let jm = judge_model.clone();
+            let checkpoints = assess_checkpoints.clone();
+            let input_messages = run.input_messages.clone();
 
-            let assess_prompt = if assess_checkpoints.is_empty() {
-                format!(
-                    "You are evaluating the quality of an AI model's response. Rate the following response on a scale from 0 to 10, where 0 is completely incorrect/unhelpful and 10 is perfect.\n\nInput messages that produced this response:\n{}\n\nModel Response:\n{}\n\nProvide your evaluation in this JSON format:\n{{\"score\": <0-10>, \"comment\": \"<brief explanation>\", \"strengths\": [\"...\"], \"weaknesses\": [\"...\"]}}",
-                    run.input_messages, output
-                )
-            } else {
-                let criteria_list = assess_checkpoints.iter().enumerate()
-                    .map(|(i, cp)| format!("{}. {} — {}", i + 1, cp.name, cp.criterion))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let cp_score_tpl = assess_checkpoints.iter()
-                    .map(|cp| format!("{{\"name\":\"{}\",\"passed\":true,\"score\":<0-10>,\"comment\":\"<explanation>\"}}", cp.name))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "You are evaluating an AI model's response against specific validation criteria.\n\nValidation Criteria:\n{}\n\nInput messages:\n{}\n\nModel Response:\n{}\n\nEvaluate the response against EACH criterion, then give an overall score.\nRespond ONLY with JSON:\n{{\"score\": <0-10>, \"comment\": \"<overall evaluation>\", \"checkpoint_scores\": [{}], \"strengths\": [\"...\"], \"weaknesses\": [\"...\"]}}",
-                    criteria_list, run.input_messages, output, cp_score_tpl
-                )
-            };
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
 
-            let messages = vec![InputMessage {
-                role: "user".to_string(),
-                content: assess_prompt,
-            }];
-
-            let ar_id = Uuid::new_v4().to_string();
-            let now = Utc::now().timestamp();
-
-            match llm_client
-                .call(
-                    &judge_model.api_url,
-                    &judge_model.api_key,
-                    &judge_model.model_id,
-                    messages,
-                )
-                .await
-            {
-                Ok(result) => {
-                    let (score, comment, details) =
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result.content) {
-                            let score = parsed["score"].as_f64();
-                            let comment = parsed["comment"].as_str().map(|s| s.to_string());
-                            (score, comment, Some(result.content.clone()))
-                        } else {
-                            (None, Some(result.content.clone()), None)
-                        };
-
-                    let _ = sqlx::query(
-                        "INSERT INTO assessment_results (id, eval_run_id, mode, score, comment, details, assessor, created_at) VALUES ($1, $2, 'auto', $3, $4, $5, 'llm', $6)"
+                let assess_prompt = if checkpoints.is_empty() {
+                    format!(
+                        "You are evaluating the quality of an AI model's response. Rate the following response on a scale from 0 to 10, where 0 is completely incorrect/unhelpful and 10 is perfect.\n\nInput messages that produced this response:\n{}\n\nModel Response:\n{}\n\nProvide your evaluation in this JSON format:\n{{\"score\": <0-10>, \"comment\": \"<brief explanation>\", \"strengths\": [\"...\"], \"weaknesses\": [\"...\"]}}",
+                        input_messages, output
                     )
-                    .bind(&ar_id)
-                    .bind(&run.id)
-                    .bind(score)
-                    .bind(&comment)
-                    .bind(&details)
-                    .bind(now)
-                    .execute(&pool_clone)
-                    .await;
-                }
-                Err(e) => {
-                    let _ = sqlx::query(
-                        "INSERT INTO assessment_results (id, eval_run_id, mode, score, comment, details, assessor, created_at) VALUES ($1, $2, 'auto', NULL, $3, NULL, 'llm', $4)"
+                } else {
+                    let criteria_list = checkpoints.iter().enumerate()
+                        .map(|(i, cp)| format!("{}. {} — {}", i + 1, cp.name, cp.criterion))
+                        .collect::<Vec<_>>().join("\n");
+                    let cp_score_tpl = checkpoints.iter()
+                        .map(|cp| format!("{{\"name\":\"{}\",\"passed\":true,\"score\":<0-10>,\"comment\":\"<explanation>\"}}", cp.name))
+                        .collect::<Vec<_>>().join(", ");
+                    format!(
+                        "You are evaluating an AI model's response against specific validation criteria.\n\nValidation Criteria:\n{}\n\nInput messages:\n{}\n\nModel Response:\n{}\n\nEvaluate the response against EACH criterion, then give an overall score.\nRespond ONLY with JSON:\n{{\"score\": <0-10>, \"comment\": \"<overall evaluation>\", \"checkpoint_scores\": [{}], \"strengths\": [\"...\"], \"weaknesses\": [\"...\"]}}",
+                        criteria_list, input_messages, output, cp_score_tpl
                     )
-                    .bind(&ar_id)
-                    .bind(&run.id)
-                    .bind(&e)
-                    .bind(now)
-                    .execute(&pool_clone)
-                    .await;
+                };
+
+                let messages = vec![InputMessage { role: "user".to_string(), content: assess_prompt }];
+                let ar_id = Uuid::new_v4().to_string();
+                let now = Utc::now().timestamp();
+
+                match client.call(&jm.api_url, &jm.api_key, &jm.model_id, messages).await {
+                    Ok(result) => {
+                        let (score, comment, details) =
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result.content) {
+                                (parsed["score"].as_f64(), parsed["comment"].as_str().map(|s| s.to_string()), Some(result.content.clone()))
+                            } else {
+                                (None, Some(result.content.clone()), None)
+                            };
+                        let _ = sqlx::query(
+                            "INSERT INTO assessment_results (id, eval_run_id, mode, score, comment, details, assessor, created_at) VALUES ($1, $2, 'auto', $3, $4, $5, 'llm', $6)"
+                        ).bind(&ar_id).bind(&run.id).bind(score).bind(&comment).bind(&details).bind(now)
+                        .execute(&pool).await;
+                    }
+                    Err(e) => {
+                        let _ = sqlx::query(
+                            "INSERT INTO assessment_results (id, eval_run_id, mode, score, comment, details, assessor, created_at) VALUES ($1, $2, 'auto', NULL, $3, NULL, 'llm', $4)"
+                        ).bind(&ar_id).bind(&run.id).bind(&e).bind(now)
+                        .execute(&pool).await;
+                    }
                 }
-            }
+            });
         }
+
+        while join_set.join_next().await.is_some() {}
     });
 
     Ok(Json(json!({ "success": true, "data": { "message": "Auto assessment started" } })))

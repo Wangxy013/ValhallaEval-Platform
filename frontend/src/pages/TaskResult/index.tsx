@@ -717,6 +717,11 @@ export default function TaskResultPage() {
             <Descriptions.Item label="创建时间">{dayjs(task.created_at * 1000).format('YYYY-MM-DD HH:mm')}</Descriptions.Item>
             {task.started_at && <Descriptions.Item label="开始时间">{dayjs(task.started_at * 1000).format('YYYY-MM-DD HH:mm')}</Descriptions.Item>}
             {task.completed_at && <Descriptions.Item label="完成时间">{dayjs(task.completed_at * 1000).format('YYYY-MM-DD HH:mm')}</Descriptions.Item>}
+            <Descriptions.Item label="执行并发数">
+              <Tooltip title="推理执行、验证校验、自动评估三个阶段均以此并发数同时发起 LLM 请求">
+                <Tag color="blue">{task.concurrency ?? 3} 个并发</Tag>
+              </Tooltip>
+            </Descriptions.Item>
           </Descriptions>
 
           {/* Configured validation checkpoints — shown so users know what will be validated */}

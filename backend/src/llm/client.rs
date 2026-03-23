@@ -40,6 +40,12 @@ pub struct LlmClient {
     client: Client,
 }
 
+impl Clone for LlmClient {
+    fn clone(&self) -> Self {
+        Self { client: self.client.clone() }
+    }
+}
+
 impl LlmClient {
     pub fn new() -> Self {
         let client = Client::builder()

@@ -24,6 +24,7 @@ interface FormState {
   dataset_id: string
   test_item_ids: string[]
   repeat_count: number
+  concurrency: number
   assessment_mode: AssessmentMode
   custom_rules: string
   checkpoints: Array<{ name: string; criterion: string }>
@@ -38,6 +39,7 @@ const initialState: FormState = {
   dataset_id: '',
   test_item_ids: [],
   repeat_count: 1,
+  concurrency: 3,
   assessment_mode: 'manual',
   custom_rules: '',
   checkpoints: [],
@@ -113,6 +115,7 @@ export default function NewTaskPage() {
       dataset_id: form.dataset_id,
       test_item_ids: form.test_item_ids,
       repeat_count: form.repeat_count,
+      concurrency: form.concurrency,
       assessment_mode: form.assessment_mode,
       assessment_config: form.custom_rules ? { custom_rules: form.custom_rules } : undefined,
       validation_checkpoints: form.checkpoints,
@@ -337,6 +340,18 @@ export default function NewTaskPage() {
           />
           <Text type="secondary" style={{ marginLeft: 8 }}>每条数据重复执行的次数（1-5次）</Text>
         </Form.Item>
+        <Form.Item
+          label="并发数"
+          tooltip="三个阶段（推理执行、验证校验、自动评估）同时发起的最大 LLM 请求数，建议 3-5，过高可能触发 API 限流"
+        >
+          <InputNumber
+            min={1}
+            max={20}
+            value={form.concurrency}
+            onChange={v => updateForm({ concurrency: v ?? 3 })}
+          />
+          <Text type="secondary" style={{ marginLeft: 8 }}>并发调用数（1-20，默认 3）</Text>
+        </Form.Item>
       </Form>
       {form.dataset_id && (
         <>
@@ -442,6 +457,7 @@ export default function NewTaskPage() {
         <p><strong>已选模型：</strong>{form.model_config_ids.length} 个</p>
         <p><strong>已选Prompt：</strong>{form.prompt_ids.length} 个</p>
         <p><strong>测试数据：</strong>{form.test_item_ids.length} 条，重复 {form.repeat_count} 次</p>
+        <p><strong>并发数：</strong>{form.concurrency} 个同时调用</p>
         <p><strong>校验检查点：</strong>{form.checkpoints.length} 个</p>
         <p><strong>评估模式：</strong>
           {form.assessment_mode === 'manual' ? '人工评估' :

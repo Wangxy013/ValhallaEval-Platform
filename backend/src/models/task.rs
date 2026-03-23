@@ -12,6 +12,7 @@ pub struct Task {
     pub assessment_mode: String,
     pub assessment_config: Option<String>,
     pub repeat_count: i64,
+    pub concurrency: i64,
     pub created_at: i64,
     pub updated_at: i64,
     pub started_at: Option<i64>,
@@ -53,6 +54,8 @@ pub struct CreateTask {
     pub assessment_mode: Option<String>,
     pub assessment_config: Option<serde_json::Value>,
     pub repeat_count: Option<i64>,
+    /// Max parallel LLM calls (1-20, default 3)
+    pub concurrency: Option<i64>,
     pub prompt_ids: Option<Vec<String>>,
     pub model_config_ids: Option<Vec<String>>,
     /// Selected test item IDs (snapshotted at creation time)
