@@ -2,7 +2,7 @@
 
 # ValhallaEval
 
-**Norse-Inspired LLM Evaluation Platform**
+**Multi-version Prompt Testing & LLM Evaluation Platform**
 
 一款面向 Prompt 调优验证与模型横向评测的 Web 平台，支持多版本 Prompt 并行测试、多模型效果对比、验证点自动校验与多模式评估，帮助团队高效验证 Prompt 指令生效情况与模型能力差异。
 
