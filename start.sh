@@ -1,5 +1,5 @@
 #!/bin/bash
-# 一键启动开发环境
+# 一键启动本地开发环境
 
 set -e
 ROOT=$(cd "$(dirname "$0")" && pwd)

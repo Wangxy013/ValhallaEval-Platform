@@ -1,6 +1,7 @@
 # Rust build artifacts
 backend/target/
 backend/.env
+.env.prod
 
 # Node.js / frontend
 frontend/node_modules/
