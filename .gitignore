@@ -2,6 +2,7 @@
 backend/target/
 backend/.env
 .env.prod
+docker-compose.prod.yml
 
 # Node.js / frontend
 frontend/node_modules/
