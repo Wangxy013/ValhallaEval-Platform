@@ -2,12 +2,13 @@ import { useState, useMemo, useEffect } from 'react'
 import {
   Tabs, Card, Button, Space, Table, Typography, Row, Col, Statistic,
   message, Tag, Select, Descriptions, Divider, Progress, Collapse, Alert, Tooltip, Empty, Steps,
+  Modal, FloatButton,
 } from 'antd'
 import type { ColumnType } from 'antd/es/table'
 import {
   PlayCircleOutlined, PauseCircleOutlined, CheckCircleOutlined,
   RobotOutlined, CaretRightOutlined, ArrowUpOutlined, ArrowDownOutlined,
-  QuestionCircleOutlined, LoadingOutlined, SyncOutlined,
+  QuestionCircleOutlined, LoadingOutlined, SyncOutlined, EyeOutlined,
 } from '@ant-design/icons'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useParams, useNavigate } from 'react-router-dom'
@@ -16,11 +17,17 @@ import {
   getTask, getTaskResults, listEvalRuns, listCheckpoints, getTaskProgress,
   executeTask, pauseTask, resumeTask, validateRuns, autoAssessRuns,
 } from '../../api/tasks'
-import type { EvalRun, RunStatus, InputMessage, CheckpointGroupStat, TaskProgress } from '../../types'
+import type { EvalRun, RunStatus, InputMessage, CheckpointGroupStat, TaskProgress, ValidationCheckpoint } from '../../types'
 import { TaskStatusTag, RunStatusTag } from '../../components/StatusTag'
 import EvalTypeTag from '../../components/EvalTypeTag'
 import ValidationAnnotations from '../../components/ValidationAnnotations'
 import CompareModal from './CompareModal'
+import {
+  getTaskModelOptionLabel,
+  getTaskPromptOptionLabel,
+  sortRunsForDetail,
+  sortValidationResults,
+} from './helpers'
 
 const { Text } = Typography
 
@@ -34,10 +41,10 @@ interface DiffEntry {
   changed: boolean
 }
 
-function CheckpointDiffSummary({ runs }: { runs: EvalRun[] }) {
+function CheckpointDiffSummary({ runs, checkpoints }: { runs: EvalRun[]; checkpoints: ValidationCheckpoint[] }) {
   if (runs.length < 2) return null
 
-  const allVrByRun = runs.map(r => r.validation_results ?? [])
+  const allVrByRun = runs.map(run => sortValidationResults(run.validation_results ?? [], checkpoints))
   const anyValidated = allVrByRun.some(vrs => vrs.length > 0)
   if (!anyValidated) return null
 
@@ -124,12 +131,61 @@ function CheckpointDiffSummary({ runs }: { runs: EvalRun[] }) {
   )
 }
 
+interface PreviewState {
+  title: string
+  content: string
+}
+
+function PreviewModal({
+  preview,
+  onClose,
+}: {
+  preview: PreviewState | null
+  onClose: () => void
+}) {
+  return (
+    <Modal
+      open={!!preview}
+      title={preview?.title}
+      onCancel={onClose}
+      footer={null}
+      width={900}
+    >
+      <div
+        style={{
+          maxHeight: '70vh',
+          overflow: 'auto',
+          background: '#fafafa',
+          borderRadius: 8,
+          padding: 16,
+          whiteSpace: 'pre-wrap',
+          lineHeight: 1.7,
+        }}
+      >
+        {preview?.content}
+      </div>
+    </Modal>
+  )
+}
+
 // ── RunCard: one model-output card inside the grouped expansion ───────────────
-function RunCard({ run }: { run: EvalRun }) {
+function RunCard({
+  run,
+  checkpoints,
+  onPreview,
+}: {
+  run: EvalRun
+  checkpoints: ValidationCheckpoint[]
+  onPreview: (preview: PreviewState) => void
+}) {
   const annotations = (run.validation_results ?? []).flatMap(vr => vr.annotations ?? [])
+  const validationResults = sortValidationResults(run.validation_results ?? [], checkpoints)
   const inputMessages: InputMessage[] = typeof run.input_messages === 'string'
     ? (() => { try { return JSON.parse(run.input_messages as unknown as string) } catch { return [] } })()
     : (run.input_messages ?? [])
+  const inputMessagePreview = inputMessages
+    .map((msg, index) => `${index + 1}. [${msg.role}] ${msg.content}`)
+    .join('\n\n')
 
   const modeBadge = (mode: string) => {
     if (mode === 'manual') return { label: '人工', color: 'orange' }
@@ -163,7 +219,22 @@ function RunCard({ run }: { run: EvalRun }) {
       {inputMessages.length > 0 && (
         <Collapse size="small" ghost style={{ marginBottom: 8 }} items={[{
           key: 'in',
-          label: <Text type="secondary" style={{ fontSize: 12 }}>输入消息</Text>,
+          label: (
+            <Space size={8}>
+              <Text type="secondary" style={{ fontSize: 12 }}>输入消息</Text>
+              <Button
+                type="link"
+                size="small"
+                icon={<EyeOutlined />}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onPreview({ title: '输入消息详情', content: inputMessagePreview })
+                }}
+              >
+                查看详情
+              </Button>
+            </Space>
+          ),
           children: (
             <div style={{ background: '#fafafa', borderRadius: 4, padding: 8 }}>
               {inputMessages.map((msg, i) => (
@@ -179,8 +250,32 @@ function RunCard({ run }: { run: EvalRun }) {
 
       {/* Output */}
       <div style={{ marginBottom: 8 }}>
-        <Text type="secondary" style={{ fontSize: 11 }}>模型输出</Text>
-        <div style={{ background: '#fafafa', borderRadius: 4, padding: 8, marginTop: 4, maxHeight: 220, overflow: 'auto' }}>
+        <Space size={8}>
+          <Text type="secondary" style={{ fontSize: 11 }}>模型输出</Text>
+          {(run.output_content || run.error_message) && (
+            <Button
+              type="link"
+              size="small"
+              icon={<EyeOutlined />}
+              onClick={() => onPreview({
+                title: '模型输出详情',
+                content: run.output_content ?? run.error_message ?? '暂无输出',
+              })}
+            >
+              查看详情
+            </Button>
+          )}
+        </Space>
+        <div
+          style={{ background: '#fafafa', borderRadius: 4, padding: 8, marginTop: 4, maxHeight: 220, overflow: 'auto', cursor: run.output_content || run.error_message ? 'pointer' : 'default' }}
+          onClick={() => {
+            if (!run.output_content && !run.error_message) return
+            onPreview({
+              title: '模型输出详情',
+              content: run.output_content ?? run.error_message ?? '暂无输出',
+            })
+          }}
+        >
           {run.output_content ? (
             annotations.length > 0
               ? <ValidationAnnotations outputContent={run.output_content} annotations={annotations} />
@@ -199,7 +294,7 @@ function RunCard({ run }: { run: EvalRun }) {
           <Divider style={{ margin: '6px 0' }} />
           <Text type="secondary" style={{ fontSize: 11 }}>校验结果</Text>
           <div style={{ marginTop: 4 }}>
-            {run.validation_results.map((vr, i) => (
+            {validationResults.map((vr, i) => (
               <div key={i} style={{
                 marginBottom: 8,
                 padding: '6px 8px',
@@ -611,6 +706,9 @@ export default function TaskResultPage() {
   const [filterModel, setFilterModel] = useState<string | undefined>()
   const [selectedRunIds, setSelectedRunIds] = useState<string[]>([])
   const [compareOpen, setCompareOpen] = useState(false)
+  const [preview, setPreview] = useState<PreviewState | null>(null)
+  const [expandedGroupedRowKeys, setExpandedGroupedRowKeys] = useState<string[]>([])
+  const [expandedFlatRowKeys, setExpandedFlatRowKeys] = useState<string[]>([])
 
   const { data: task, isLoading: taskLoading } = useQuery({
     queryKey: ['task', taskId],
@@ -697,26 +795,42 @@ export default function TaskResultPage() {
   }, [runs, filterPrompt, filterModel, task])
 
   // Group by test item for the detail comparison view
+  const testItemOrderMap = useMemo(
+    () => new Map((task?.test_items ?? []).map(item => [item.id, item.order_index])),
+    [task?.test_items]
+  )
+
   const groupedItems = useMemo(() => {
-    const map = new Map<string, { test_item_id: string; content: string; runs: EvalRun[]; completed: number }>()
+    const map = new Map<string, { test_item_id: string; content: string; runs: EvalRun[]; completed: number; order_index: number }>()
     for (const run of filteredRuns) {
       const key = run.task_test_item_id
-      if (!map.has(key)) map.set(key, { test_item_id: key, content: run.test_item_content ?? key, runs: [], completed: 0 })
+      if (!map.has(key)) {
+        map.set(key, {
+          test_item_id: key,
+          content: run.test_item_content ?? key,
+          runs: [],
+          completed: 0,
+          order_index: testItemOrderMap.get(key) ?? Number.MAX_SAFE_INTEGER,
+        })
+      }
       const g = map.get(key)!
       g.runs.push(run)
       if (run.status === 'completed') g.completed++
     }
-    return Array.from(map.values())
-  }, [filteredRuns])
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.order_index !== b.order_index) return a.order_index - b.order_index
+      return a.content.localeCompare(b.content, undefined, { numeric: true, sensitivity: 'base' })
+    })
+  }, [filteredRuns, testItemOrderMap])
 
   const selectedRuns = runs.filter(r => selectedRunIds.includes(r.id))
 
   const promptOptions = task?.prompts?.map(tp => ({
-    label: tp.label ?? tp.prompt?.name ?? tp.prompt_id,
+    label: getTaskPromptOptionLabel(tp),
     value: tp.prompt_id,
   })) ?? []
   const modelOptions = task?.models?.map(tm => ({
-    label: tm.label ?? tm.model?.name ?? tm.model_config_id,
+    label: getTaskModelOptionLabel(tm),
     value: tm.model_config_id,
   })) ?? []
 
@@ -735,6 +849,12 @@ export default function TaskResultPage() {
             <Descriptions.Item label="创建时间">{dayjs(task.created_at * 1000).format('YYYY-MM-DD HH:mm')}</Descriptions.Item>
             {task.started_at && <Descriptions.Item label="开始时间">{dayjs(task.started_at * 1000).format('YYYY-MM-DD HH:mm')}</Descriptions.Item>}
             {task.completed_at && <Descriptions.Item label="完成时间">{dayjs(task.completed_at * 1000).format('YYYY-MM-DD HH:mm')}</Descriptions.Item>}
+            <Descriptions.Item label="校验模型">
+              {task.validation_model?.name ?? task.validation_model_id ?? '未配置'}
+            </Descriptions.Item>
+            <Descriptions.Item label="评估模型">
+              {task.assessment_model?.name ?? task.assessment_model_id ?? '未配置'}
+            </Descriptions.Item>
             <Descriptions.Item label="执行并发数">
               <Tooltip title="推理执行、验证校验、自动评估三个阶段均以此并发数同时发起 LLM 请求">
                 <Tag color="blue">{task.concurrency ?? 3} 个并发</Tag>
@@ -959,10 +1079,29 @@ export default function TaskResultPage() {
 
   const groupedTableColumns: ColumnType<typeof groupedItems[0]>[] = [
     {
+      title: '序号',
+      key: 'order_index',
+      width: 70,
+      render: (_: unknown, record: typeof groupedItems[0]) => (
+        <Text>{Number.isFinite(record.order_index) ? record.order_index + 1 : '-'}</Text>
+      ),
+    },
+    {
       title: '测试数据',
       dataIndex: 'content',
       key: 'content',
-      render: (c: string) => <Text ellipsis style={{ maxWidth: 320 }} title={c}>{c}</Text>,
+      render: (c: string, record: typeof groupedItems[0]) => (
+        <Button
+          type="link"
+          style={{ padding: 0, maxWidth: 320, textAlign: 'left', height: 'auto' }}
+          onClick={() => setPreview({
+            title: `测试数据详情 #${Number.isFinite(record.order_index) ? record.order_index + 1 : '-'}`,
+            content: c,
+          })}
+        >
+          <Text ellipsis style={{ maxWidth: 320 }} title={c}>{c}</Text>
+        </Button>
+      ),
     },
     {
       title: '版本数',
@@ -1009,7 +1148,32 @@ export default function TaskResultPage() {
   ]
 
   const flatRunColumns: ColumnType<EvalRun>[] = [
-    { title: '测试数据', dataIndex: 'test_item_content', key: 'tic', render: (c: string) => <Text ellipsis style={{ maxWidth: 180 }}>{c}</Text> },
+    {
+      title: '序号',
+      key: 'order_index',
+      width: 70,
+      render: (_: unknown, record: EvalRun) => {
+        const orderIndex = testItemOrderMap.get(record.task_test_item_id)
+        return <Text>{orderIndex != null ? orderIndex + 1 : '-'}</Text>
+      },
+    },
+    {
+      title: '测试数据',
+      dataIndex: 'test_item_content',
+      key: 'tic',
+      render: (c: string, record: EvalRun) => (
+        <Button
+          type="link"
+          style={{ padding: 0, maxWidth: 180, textAlign: 'left', height: 'auto' }}
+          onClick={() => setPreview({
+            title: `测试数据详情 #${testItemOrderMap.get(record.task_test_item_id) != null ? (testItemOrderMap.get(record.task_test_item_id) as number) + 1 : '-'}`,
+            content: c,
+          })}
+        >
+          <Text ellipsis style={{ maxWidth: 180 }}>{c}</Text>
+        </Button>
+      ),
+    },
     { title: 'Prompt', dataIndex: 'prompt_label', key: 'pl', render: (v?: string) => v ? <Tag color="blue">{v}</Tag> : <Text type="secondary">-</Text> },
     { title: '模型', dataIndex: 'model_label', key: 'ml', render: (v?: string) => v ? <Tag color="purple">{v}</Tag> : <Text type="secondary">-</Text> },
     { title: '状态', dataIndex: 'status', key: 'st', width: 90, render: (s: RunStatus) => <RunStatusTag status={s} /> },
@@ -1037,6 +1201,25 @@ export default function TaskResultPage() {
               <Button size="small" onClick={() => setSelectedRunIds([])}>清除</Button>
             </>
           )}
+          {hasMultipleVariants ? (
+            <>
+              <Button size="small" onClick={() => setExpandedGroupedRowKeys(groupedItems.map(item => item.test_item_id))}>
+                全部展开
+              </Button>
+              <Button size="small" onClick={() => setExpandedGroupedRowKeys([])}>
+                全部收起
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button size="small" onClick={() => setExpandedFlatRowKeys(filteredRuns.map(run => run.id))}>
+                全部展开
+              </Button>
+              <Button size="small" onClick={() => setExpandedFlatRowKeys([])}>
+                全部收起
+              </Button>
+            </>
+          )}
         </Space>
       </Card>
 
@@ -1049,25 +1232,21 @@ export default function TaskResultPage() {
           loading={runsLoading}
           pagination={{ pageSize: 20 }}
           expandable={{
-            defaultExpandAllRows: groupedItems.length <= 5,
+            expandedRowKeys: expandedGroupedRowKeys,
+            onExpandedRowsChange: keys => setExpandedGroupedRowKeys(keys as string[]),
             expandedRowRender: (record) => {
-              // Baseline first, then others in stable order
-              const sortedRuns = [...record.runs].sort((a, b) => {
-                if (a.prompt_is_baseline && !b.prompt_is_baseline) return -1
-                if (!a.prompt_is_baseline && b.prompt_is_baseline) return 1
-                return 0
-              })
+              const sortedRuns = sortRunsForDetail(record.runs, task?.prompts ?? [], task?.models ?? [])
               return (
                 <div style={{ padding: '8px 0' }}>
                   <Row gutter={12} align="stretch">
                     {sortedRuns.map(run => (
                       <Col key={run.id} span={colSpanForRuns(sortedRuns.length)} style={{ marginBottom: 8 }}>
-                        <RunCard run={run} />
+                        <RunCard run={run} checkpoints={checkpoints} onPreview={setPreview} />
                       </Col>
                     ))}
                   </Row>
                   {/* Diff summary: ordered baseline-first */}
-                  <CheckpointDiffSummary runs={sortedRuns} />
+                  <CheckpointDiffSummary runs={sortedRuns} checkpoints={checkpoints} />
                 </div>
               )
             },
@@ -1088,8 +1267,10 @@ export default function TaskResultPage() {
             }),
           }}
           expandable={{
+            expandedRowKeys: expandedFlatRowKeys,
+            onExpandedRowsChange: keys => setExpandedFlatRowKeys(keys as string[]),
             expandedRowRender: (record: EvalRun) => (
-              <div style={{ padding: 12 }}><RunCard run={record} /></div>
+              <div style={{ padding: 12 }}><RunCard run={record} checkpoints={checkpoints} onPreview={setPreview} /></div>
             ),
           }}
           pagination={{ pageSize: 20 }}
@@ -1116,6 +1297,8 @@ export default function TaskResultPage() {
       {compareOpen && selectedRuns.length === 2 && (
         <CompareModal open={compareOpen} runs={[selectedRuns[0], selectedRuns[1]]} onClose={() => setCompareOpen(false)} />
       )}
+      <PreviewModal preview={preview} onClose={() => setPreview(null)} />
+      <FloatButton.BackTop visibilityHeight={300} />
     </div>
   )
 }

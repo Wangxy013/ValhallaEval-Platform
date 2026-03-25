@@ -49,7 +49,10 @@ pub async fn create_prompt(
     .fetch_one(&pool)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "success": true, "data": prompt }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "success": true, "data": prompt })),
+    ))
 }
 
 pub async fn get_prompt(

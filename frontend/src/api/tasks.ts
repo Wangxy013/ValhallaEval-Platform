@@ -7,6 +7,8 @@ export interface CreateTaskPayload {
   eval_type: string;
   dataset_id?: string;
   model_config_ids: string[];
+  validation_model_id: string;
+  assessment_model_id: string;
   prompt_ids: string[];
   baseline_prompt_id?: string;
   test_item_ids?: string[];
@@ -27,7 +29,14 @@ export async function getTask(id: string): Promise<Task> {
   // Backend returns { task, prompts, models, test_items }
   const d = res.data
   if (d && d.task) {
-    return { ...d.task, prompts: d.prompts, models: d.models, test_items: d.test_items }
+    return {
+      ...d.task,
+      prompts: d.prompts,
+      models: d.models,
+      test_items: d.test_items,
+      validation_model: d.validation_model,
+      assessment_model: d.assessment_model,
+    }
   }
   return d
 }
@@ -36,7 +45,14 @@ export async function createTask(data: CreateTaskPayload): Promise<Task> {
   const res = await client.post('/tasks', data)
   const d = res.data
   if (d && d.task) {
-    return { ...d.task, prompts: d.prompts, models: d.models, test_items: d.test_items }
+    return {
+      ...d.task,
+      prompts: d.prompts,
+      models: d.models,
+      test_items: d.test_items,
+      validation_model: d.validation_model,
+      assessment_model: d.assessment_model,
+    }
   }
   return d
 }
@@ -45,7 +61,14 @@ export async function updateTask(id: string, data: Partial<CreateTaskPayload>): 
   const res = await client.put(`/tasks/${id}`, data)
   const d = res.data
   if (d && d.task) {
-    return { ...d.task, prompts: d.prompts, models: d.models, test_items: d.test_items }
+    return {
+      ...d.task,
+      prompts: d.prompts,
+      models: d.models,
+      test_items: d.test_items,
+      validation_model: d.validation_model,
+      assessment_model: d.assessment_model,
+    }
   }
   return d
 }

@@ -1,6 +1,6 @@
 [package]
 name = "valhalla-eval-backend"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 
 [dependencies]
@@ -21,3 +21,7 @@ dotenv = "0.15"
 tokio-stream = "0.1"
 futures = "0.3"
 async-trait = "0.1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

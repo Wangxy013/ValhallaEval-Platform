@@ -16,9 +16,79 @@ use crate::models::{
     ValidationCheckpoint, ValidationResult,
 };
 
+type InferenceWorkUnit = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Vec<InputMessage>,
+    i64,
+);
+
+fn build_validation_prompt(checkpoint_name: &str, criterion: &str, output: &str) -> String {
+    format!(
+        "你是一名严谨的中文评测裁判。请结合下面的校验点名称、校验标准和模型输出，判断该输出是否通过校验。\n\n校验点名称：{}\n校验标准：{}\n模型输出：\n{}\n\n请只返回 JSON，不要输出其他内容，格式如下：\n{{\"result\":\"pass\" 或 \"fail\", \"comment\":\"请用中文简洁说明判断理由\"}}",
+        checkpoint_name, criterion, output
+    )
+}
+
+fn parse_validation_response(content: &str) -> (String, String) {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+        let result = parsed["result"].as_str().unwrap_or("fail").to_lowercase();
+        let status = if result == "pass" || result == "通过" {
+            "pass"
+        } else {
+            "fail"
+        };
+        let comment = parsed["comment"]
+            .as_str()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| content.to_string());
+        return (status.to_string(), comment);
+    }
+
+    let normalized = content.to_lowercase();
+    if normalized.contains("\"result\":\"pass\"")
+        || normalized.starts_with("pass")
+        || content.contains("通过")
+    {
+        return ("pass".to_string(), content.to_string());
+    }
+
+    ("fail".to_string(), content.to_string())
+}
+
+fn resolve_stage_model_id(
+    stage_model_id: Option<&String>,
+    task_models: &[TaskModel],
+) -> Option<String> {
+    stage_model_id.cloned().or_else(|| {
+        task_models
+            .first()
+            .map(|model| model.model_config_id.clone())
+    })
+}
+
+async fn ensure_model_config_exists(pool: &PgPool, model_id: &str) -> AppResult<()> {
+    let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM model_configs WHERE id = $1")
+        .bind(model_id)
+        .fetch_one(pool)
+        .await?;
+
+    if exists.0 == 0 {
+        return Err(AppError::BadRequest(format!(
+            "模型配置不存在: {}",
+            model_id
+        )));
+    }
+
+    Ok(())
+}
+
 pub async fn list_tasks(State(pool): State<PgPool>) -> AppResult<Json<Value>> {
     let tasks = sqlx::query_as::<_, Task>(
-        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks ORDER BY created_at DESC"
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, validation_model_id, assessment_model_id, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks ORDER BY created_at DESC"
     )
     .fetch_all(&pool)
     .await?;
@@ -42,28 +112,33 @@ pub async fn create_task(
     // Validate referenced model configs exist
     if let Some(model_ids) = &payload.model_config_ids {
         for model_id in model_ids {
-            let exists: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM model_configs WHERE id = $1"
-            )
-            .bind(model_id)
-            .fetch_one(&pool)
-            .await?;
-            if exists.0 == 0 {
-                return Err(AppError::BadRequest(format!("模型配置不存在: {}", model_id)));
-            }
+            ensure_model_config_exists(&pool, model_id).await?;
         }
     }
+    let validation_model_id = payload
+        .validation_model_id
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("请选择校验阶段模型".to_string()))?;
+    ensure_model_config_exists(&pool, validation_model_id).await?;
+
+    let assessment_model_id = payload
+        .assessment_model_id
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("请选择评估阶段模型".to_string()))?;
+    ensure_model_config_exists(&pool, assessment_model_id).await?;
+
     // Validate referenced prompts exist
     if let Some(prompt_ids) = &payload.prompt_ids {
         for prompt_id in prompt_ids {
-            let exists: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM prompts WHERE id = $1"
-            )
-            .bind(prompt_id)
-            .fetch_one(&pool)
-            .await?;
+            let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM prompts WHERE id = $1")
+                .bind(prompt_id)
+                .fetch_one(&pool)
+                .await?;
             if exists.0 == 0 {
-                return Err(AppError::BadRequest(format!("Prompt 不存在: {}", prompt_id)));
+                return Err(AppError::BadRequest(format!(
+                    "Prompt 不存在: {}",
+                    prompt_id
+                )));
             }
         }
     }
@@ -71,12 +146,14 @@ pub async fn create_task(
     let now = Utc::now().timestamp();
     let validation_config = payload.validation_config.as_ref().map(|v| v.to_string());
     let assessment_config = payload.assessment_config.as_ref().map(|v| v.to_string());
-    let assessment_mode = payload.assessment_mode.unwrap_or_else(|| "manual".to_string());
+    let assessment_mode = payload
+        .assessment_mode
+        .unwrap_or_else(|| "manual".to_string());
     let repeat_count = payload.repeat_count.unwrap_or(1);
-    let concurrency = payload.concurrency.unwrap_or(3).max(1).min(20);
+    let concurrency = payload.concurrency.unwrap_or(3).clamp(1, 20);
 
     sqlx::query(
-        "INSERT INTO tasks (id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at) VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9, $10, $11, $12)"
+        "INSERT INTO tasks (id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, validation_model_id, assessment_model_id, repeat_count, concurrency, created_at, updated_at) VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"
     )
     .bind(&id)
     .bind(&payload.name)
@@ -86,6 +163,8 @@ pub async fn create_task(
     .bind(&validation_config)
     .bind(&assessment_mode)
     .bind(&assessment_config)
+    .bind(&payload.validation_model_id)
+    .bind(&payload.assessment_model_id)
     .bind(repeat_count)
     .bind(concurrency)
     .bind(now)
@@ -95,7 +174,9 @@ pub async fn create_task(
 
     if let Some(prompt_ids) = &payload.prompt_ids {
         // If baseline_prompt_id is not set, default to the first prompt
-        let baseline = payload.baseline_prompt_id.as_deref()
+        let baseline = payload
+            .baseline_prompt_id
+            .as_deref()
             .or_else(|| prompt_ids.first().map(|s| s.as_str()));
         for prompt_id in prompt_ids {
             let tp_id = Uuid::new_v4().to_string();
@@ -112,26 +193,27 @@ pub async fn create_task(
     if let Some(model_ids) = &payload.model_config_ids {
         for model_id in model_ids {
             let tm_id = Uuid::new_v4().to_string();
-            sqlx::query("INSERT INTO task_models (id, task_id, model_config_id) VALUES ($1, $2, $3)")
-                .bind(&tm_id)
-                .bind(&id)
-                .bind(model_id)
-                .execute(&pool)
-                .await?;
+            sqlx::query(
+                "INSERT INTO task_models (id, task_id, model_config_id) VALUES ($1, $2, $3)",
+            )
+            .bind(&tm_id)
+            .bind(&id)
+            .bind(model_id)
+            .execute(&pool)
+            .await?;
         }
     }
 
     // Snapshot selected test items at task creation time (data is locked from this point)
     if let Some(item_ids) = &payload.test_item_ids {
         for (idx, item_id) in item_ids.iter().enumerate() {
-            let content: Option<(String,)> = sqlx::query_as(
-                "SELECT content FROM test_items WHERE id = $1"
-            )
-            .bind(item_id)
-            .fetch_optional(&pool)
-            .await
-            .ok()
-            .flatten();
+            let content: Option<(String,)> =
+                sqlx::query_as("SELECT content FROM test_items WHERE id = $1")
+                    .bind(item_id)
+                    .fetch_optional(&pool)
+                    .await
+                    .ok()
+                    .flatten();
 
             if let Some((content,)) = content {
                 let tti_id = Uuid::new_v4().to_string();
@@ -172,7 +254,10 @@ pub async fn create_task(
     }
 
     let task = get_task_with_associations(&pool, &id).await?;
-    Ok((StatusCode::CREATED, Json(json!({ "success": true, "data": task }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "success": true, "data": task })),
+    ))
 }
 
 pub async fn get_task(
@@ -185,22 +270,22 @@ pub async fn get_task(
 
 async fn get_task_with_associations(pool: &PgPool, id: &str) -> AppResult<Value> {
     let task = sqlx::query_as::<_, Task>(
-        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, validation_model_id, assessment_model_id, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
     )
     .bind(id)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound(format!("Task {} not found", id)))?;
 
-    let prompts = sqlx::query_as::<_, TaskPrompt>(
-        "SELECT id, task_id, prompt_id, label, is_baseline FROM task_prompts WHERE task_id = $1"
+    let raw_prompts = sqlx::query_as::<_, TaskPrompt>(
+        "SELECT id, task_id, prompt_id, label, is_baseline FROM task_prompts WHERE task_id = $1",
     )
     .bind(id)
     .fetch_all(pool)
     .await?;
 
-    let models = sqlx::query_as::<_, TaskModel>(
-        "SELECT id, task_id, model_config_id, label FROM task_models WHERE task_id = $1"
+    let raw_models = sqlx::query_as::<_, TaskModel>(
+        "SELECT id, task_id, model_config_id, label FROM task_models WHERE task_id = $1",
     )
     .bind(id)
     .fetch_all(pool)
@@ -213,11 +298,74 @@ async fn get_task_with_associations(pool: &PgPool, id: &str) -> AppResult<Value>
     .fetch_all(pool)
     .await?;
 
+    let mut prompts = Vec::with_capacity(raw_prompts.len());
+    for prompt in raw_prompts {
+        let prompt_detail = sqlx::query_as::<_, Prompt>(
+            "SELECT id, name, version, content, change_notes, parent_id, created_at, updated_at FROM prompts WHERE id = $1",
+        )
+        .bind(&prompt.prompt_id)
+        .fetch_optional(pool)
+        .await?;
+
+        prompts.push(json!({
+            "id": prompt.id,
+            "task_id": prompt.task_id,
+            "prompt_id": prompt.prompt_id,
+            "label": prompt.label,
+            "is_baseline": prompt.is_baseline,
+            "prompt": prompt_detail,
+        }));
+    }
+
+    let mut models = Vec::with_capacity(raw_models.len());
+    for model in raw_models {
+        let model_detail = sqlx::query_as::<_, ModelConfig>(
+            "SELECT id, name, provider, api_key, api_url, model_id, extra_config, created_at, updated_at FROM model_configs WHERE id = $1",
+        )
+        .bind(&model.model_config_id)
+        .fetch_optional(pool)
+        .await?;
+
+        models.push(json!({
+            "id": model.id,
+            "task_id": model.task_id,
+            "model_config_id": model.model_config_id,
+            "label": model.label,
+            "model": model_detail.map(ModelConfig::masked),
+        }));
+    }
+
+    let validation_model = if let Some(model_id) = task.validation_model_id.as_ref() {
+        sqlx::query_as::<_, ModelConfig>(
+            "SELECT id, name, provider, api_key, api_url, model_id, extra_config, created_at, updated_at FROM model_configs WHERE id = $1",
+        )
+        .bind(model_id)
+        .fetch_optional(pool)
+        .await?
+        .map(ModelConfig::masked)
+    } else {
+        None
+    };
+
+    let assessment_model = if let Some(model_id) = task.assessment_model_id.as_ref() {
+        sqlx::query_as::<_, ModelConfig>(
+            "SELECT id, name, provider, api_key, api_url, model_id, extra_config, created_at, updated_at FROM model_configs WHERE id = $1",
+        )
+        .bind(model_id)
+        .fetch_optional(pool)
+        .await?
+        .map(ModelConfig::masked)
+    } else {
+        None
+    };
+
     Ok(json!({
         "task": task,
         "prompts": prompts,
         "models": models,
-        "test_items": test_items
+        "test_items": test_items,
+        "validation_model": validation_model,
+        "assessment_model": assessment_model
     }))
 }
 
@@ -227,7 +375,7 @@ pub async fn update_task(
     AppJson(payload): AppJson<UpdateTask>,
 ) -> AppResult<Json<Value>> {
     let existing = sqlx::query_as::<_, Task>(
-        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, validation_model_id, assessment_model_id, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
     )
     .bind(&id)
     .fetch_optional(&pool)
@@ -249,11 +397,20 @@ pub async fn update_task(
         .as_ref()
         .map(|v| v.to_string())
         .or(existing.assessment_config);
+    let validation_model_id = payload.validation_model_id.or(existing.validation_model_id);
+    let assessment_model_id = payload.assessment_model_id.or(existing.assessment_model_id);
     let repeat_count = payload.repeat_count.unwrap_or(existing.repeat_count);
     let now = Utc::now().timestamp();
 
+    if let Some(model_id) = validation_model_id.as_ref() {
+        ensure_model_config_exists(&pool, model_id).await?;
+    }
+    if let Some(model_id) = assessment_model_id.as_ref() {
+        ensure_model_config_exists(&pool, model_id).await?;
+    }
+
     sqlx::query(
-        "UPDATE tasks SET name=$1, description=$2, eval_type=$3, dataset_id=$4, validation_config=$5, assessment_mode=$6, assessment_config=$7, repeat_count=$8, updated_at=$9 WHERE id=$10"
+        "UPDATE tasks SET name=$1, description=$2, eval_type=$3, dataset_id=$4, validation_config=$5, assessment_mode=$6, assessment_config=$7, validation_model_id=$8, assessment_model_id=$9, repeat_count=$10, updated_at=$11 WHERE id=$12"
     )
     .bind(&name)
     .bind(&description)
@@ -262,6 +419,8 @@ pub async fn update_task(
     .bind(&validation_config)
     .bind(&assessment_mode)
     .bind(&assessment_config)
+    .bind(&validation_model_id)
+    .bind(&assessment_model_id)
     .bind(repeat_count)
     .bind(now)
     .bind(&id)
@@ -291,12 +450,14 @@ pub async fn update_task(
             .await?;
         for model_id in model_ids {
             let tm_id = Uuid::new_v4().to_string();
-            sqlx::query("INSERT INTO task_models (id, task_id, model_config_id) VALUES ($1, $2, $3)")
-                .bind(&tm_id)
-                .bind(&id)
-                .bind(model_id)
-                .execute(&pool)
-                .await?;
+            sqlx::query(
+                "INSERT INTO task_models (id, task_id, model_config_id) VALUES ($1, $2, $3)",
+            )
+            .bind(&tm_id)
+            .bind(&id)
+            .bind(model_id)
+            .execute(&pool)
+            .await?;
         }
     }
 
@@ -325,7 +486,7 @@ pub async fn execute_task(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     let task = sqlx::query_as::<_, Task>(
-        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, validation_model_id, assessment_model_id, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
     )
     .bind(&id)
     .fetch_optional(&pool)
@@ -337,18 +498,20 @@ pub async fn execute_task(
     }
 
     let task_models = sqlx::query_as::<_, TaskModel>(
-        "SELECT id, task_id, model_config_id, label FROM task_models WHERE task_id = $1"
+        "SELECT id, task_id, model_config_id, label FROM task_models WHERE task_id = $1",
     )
     .bind(&id)
     .fetch_all(&pool)
     .await?;
 
     if task_models.is_empty() {
-        return Err(AppError::BadRequest("Task has no models configured".to_string()));
+        return Err(AppError::BadRequest(
+            "Task has no models configured".to_string(),
+        ));
     }
 
     let task_prompts = sqlx::query_as::<_, TaskPrompt>(
-        "SELECT id, task_id, prompt_id, label, is_baseline FROM task_prompts WHERE task_id = $1"
+        "SELECT id, task_id, prompt_id, label, is_baseline FROM task_prompts WHERE task_id = $1",
     )
     .bind(&id)
     .fetch_all(&pool)
@@ -370,7 +533,7 @@ pub async fn execute_task(
         // Legacy path: load all items from dataset and snapshot now
         let raw_items = if let Some(dataset_id) = &task.dataset_id {
             sqlx::query_as::<_, (String, String)>(
-                "SELECT id, content FROM test_items WHERE dataset_id = $1 ORDER BY order_index ASC"
+                "SELECT id, content FROM test_items WHERE dataset_id = $1 ORDER BY order_index ASC",
             )
             .bind(dataset_id)
             .fetch_all(&pool)
@@ -413,7 +576,8 @@ pub async fn execute_task(
         .execute(&pool)
         .await?;
 
-    let mut model_map: std::collections::HashMap<String, ModelConfig> = std::collections::HashMap::new();
+    let mut model_map: std::collections::HashMap<String, ModelConfig> =
+        std::collections::HashMap::new();
     for tm in &task_models {
         let model_cfg = sqlx::query_as::<_, ModelConfig>(
             "SELECT id, name, provider, api_key, api_url, model_id, extra_config, created_at, updated_at FROM model_configs WHERE id = $1"
@@ -426,7 +590,8 @@ pub async fn execute_task(
         }
     }
 
-    let mut prompt_map: std::collections::HashMap<String, Prompt> = std::collections::HashMap::new();
+    let mut prompt_map: std::collections::HashMap<String, Prompt> =
+        std::collections::HashMap::new();
     for tp in &task_prompts {
         let prompt = sqlx::query_as::<_, Prompt>(
             "SELECT id, name, version, content, change_notes, parent_id, created_at, updated_at FROM prompts WHERE id = $1"
@@ -442,7 +607,7 @@ pub async fn execute_task(
     let pool_clone = pool.clone();
     let task_id = id.clone();
     let repeat_count = task.repeat_count;
-    let concurrency = task.concurrency.max(1).min(20) as usize;
+    let concurrency = task.concurrency.clamp(1, 20) as usize;
 
     tokio::spawn(async move {
         use std::sync::Arc;
@@ -466,7 +631,7 @@ pub async fn execute_task(
         };
 
         // Pre-create all eval_run records so progress is visible immediately
-        let mut work_units: Vec<(String, String, String, Option<String>, Option<String>, Vec<InputMessage>, i64)> = Vec::new();
+        let mut work_units: Vec<InferenceWorkUnit> = Vec::new();
         for (tti_id, item_content) in &task_test_item_ids {
             for tm in &task_models {
                 let model_cfg = match model_map.get(&tm.id) {
@@ -479,15 +644,22 @@ pub async fn execute_task(
                         let task_prompt_id: Option<String>;
 
                         if let Some((tp_id, prompt_content)) = prompt_entry {
-                            messages.push(InputMessage { role: "system".to_string(), content: prompt_content.clone() });
+                            messages.push(InputMessage {
+                                role: "system".to_string(),
+                                content: prompt_content.clone(),
+                            });
                             task_prompt_id = Some(tp_id.clone());
                         } else {
                             task_prompt_id = None;
                         }
-                        messages.push(InputMessage { role: "user".to_string(), content: item_content.clone() });
+                        messages.push(InputMessage {
+                            role: "user".to_string(),
+                            content: item_content.clone(),
+                        });
 
                         let run_id = Uuid::new_v4().to_string();
-                        let input_json = serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string());
+                        let input_json =
+                            serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string());
                         let _ = sqlx::query(
                             "INSERT INTO eval_runs (id, task_id, task_prompt_id, task_model_id, task_test_item_id, repeat_index, status, input_messages, created_at) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)"
                         )
@@ -560,16 +732,26 @@ pub async fn execute_task(
 
         // Only mark completed if still in running state (not paused)
         let final_status: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id=$1")
-            .bind(&task_id).fetch_one(&pool_clone).await.unwrap_or(("failed".to_string(),));
+            .bind(&task_id)
+            .fetch_one(&pool_clone)
+            .await
+            .unwrap_or(("failed".to_string(),));
         if final_status.0 == "running" {
             let ts = Utc::now().timestamp();
             let _ = sqlx::query(
-                "UPDATE tasks SET status='completed', completed_at=$1, updated_at=$2 WHERE id=$3"
-            ).bind(ts).bind(ts).bind(&task_id).execute(&pool_clone).await;
+                "UPDATE tasks SET status='completed', completed_at=$1, updated_at=$2 WHERE id=$3",
+            )
+            .bind(ts)
+            .bind(ts)
+            .bind(&task_id)
+            .execute(&pool_clone)
+            .await;
         }
     });
 
-    Ok(Json(json!({ "success": true, "data": { "status": "running", "task_id": id } })))
+    Ok(Json(
+        json!({ "success": true, "data": { "status": "running", "task_id": id } }),
+    ))
 }
 
 pub async fn pause_task(
@@ -578,7 +760,7 @@ pub async fn pause_task(
 ) -> AppResult<Json<Value>> {
     let now = Utc::now().timestamp();
     let result = sqlx::query(
-        "UPDATE tasks SET status='paused', updated_at=$1 WHERE id=$2 AND status='running'"
+        "UPDATE tasks SET status='paused', updated_at=$1 WHERE id=$2 AND status='running'",
     )
     .bind(now)
     .bind(&id)
@@ -589,7 +771,9 @@ pub async fn pause_task(
         return Err(AppError::BadRequest("Task is not running".to_string()));
     }
 
-    Ok(Json(json!({ "success": true, "data": { "status": "paused" } })))
+    Ok(Json(
+        json!({ "success": true, "data": { "status": "paused" } }),
+    ))
 }
 
 pub async fn resume_task(
@@ -598,7 +782,7 @@ pub async fn resume_task(
 ) -> AppResult<Json<Value>> {
     let now = Utc::now().timestamp();
     let result = sqlx::query(
-        "UPDATE tasks SET status='running', updated_at=$1 WHERE id=$2 AND status='paused'"
+        "UPDATE tasks SET status='running', updated_at=$1 WHERE id=$2 AND status='paused'",
     )
     .bind(now)
     .bind(&id)
@@ -609,7 +793,9 @@ pub async fn resume_task(
         return Err(AppError::BadRequest("Task is not paused".to_string()));
     }
 
-    Ok(Json(json!({ "success": true, "data": { "status": "running" } })))
+    Ok(Json(
+        json!({ "success": true, "data": { "status": "running" } }),
+    ))
 }
 
 pub async fn get_task_runs(
@@ -648,45 +834,109 @@ pub async fn get_task_runs(
     let mut enriched = Vec::new();
     for run in &runs {
         // Get prompt name + is_baseline via task_prompt_id -> task_prompts -> prompts
-        let prompt_info: Option<(String, bool)> = if let Some(tp_id) = &run.task_prompt_id {
-            sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, bool)>(
-                "SELECT tp.label, p.name, p.version, tp.is_baseline FROM task_prompts tp LEFT JOIN prompts p ON p.id = tp.prompt_id WHERE tp.id = $1"
+        let prompt_info: Option<(String, bool, Option<Prompt>)> = if let Some(tp_id) =
+            &run.task_prompt_id
+        {
+            sqlx::query_as::<_, (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                bool,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
+            )>(
+                "SELECT tp.label, p.name, p.version, tp.is_baseline, p.id, p.content, p.change_notes, p.parent_id, p.version, p.created_at, p.updated_at FROM task_prompts tp LEFT JOIN prompts p ON p.id = tp.prompt_id WHERE tp.id = $1"
             )
             .bind(tp_id)
             .fetch_optional(&pool)
             .await
             .ok()
             .flatten()
-            .map(|(label, name, version, is_baseline)| {
+            .map(|(label, name, version, is_baseline, prompt_id, content, change_notes, parent_id, prompt_version, created_at, updated_at)| {
                 let label_str = label.unwrap_or_else(|| {
-                    match (name, version) {
+                    match (name.clone(), version) {
                         (Some(n), Some(v)) => format!("{} ({})", n, v),
                         (Some(n), _) => n,
                         _ => tp_id.clone(),
                     }
                 });
-                (label_str, is_baseline)
+                let prompt = match (prompt_id, name.clone(), prompt_version, content, created_at, updated_at) {
+                    (Some(id), Some(name), version, Some(content), Some(created_at), Some(updated_at)) => Some(Prompt {
+                        id,
+                        name,
+                        version: version.unwrap_or_default(),
+                        content,
+                        change_notes,
+                        parent_id,
+                        created_at,
+                        updated_at,
+                    }),
+                    _ => None,
+                };
+                (label_str, is_baseline, prompt)
             })
         } else {
             None
         };
-        let prompt_label = prompt_info.as_ref().map(|(l, _)| l.clone());
-        let prompt_is_baseline = prompt_info.as_ref().map(|(_, b)| *b).unwrap_or(false);
+        let prompt_label = prompt_info.as_ref().map(|(label, _, _)| label.clone());
+        let prompt_is_baseline = prompt_info
+            .as_ref()
+            .map(|(_, is_baseline, _)| *is_baseline)
+            .unwrap_or(false);
+        let prompt = prompt_info
+            .as_ref()
+            .and_then(|(_, _, prompt)| prompt.clone());
 
         // Get model name via task_model_id -> task_models -> model_configs
-        let model_label: Option<String> = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-            "SELECT tm.label, mc.name FROM task_models tm LEFT JOIN model_configs mc ON mc.id = tm.model_config_id WHERE tm.id = $1"
+        let model_info: Option<(String, Option<ModelConfig>)> = sqlx::query_as::<_, (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        )>(
+            "SELECT tm.label, mc.id, mc.name, mc.provider, mc.api_key, mc.api_url, mc.model_id, mc.extra_config, mc.created_at, mc.updated_at FROM task_models tm LEFT JOIN model_configs mc ON mc.id = tm.model_config_id WHERE tm.id = $1"
         )
         .bind(&run.task_model_id)
         .fetch_optional(&pool)
         .await
         .ok()
         .flatten()
-        .map(|(label, name)| label.or(name).unwrap_or_default());
+        .map(|(label, id, name, provider, api_key, api_url, model_id, extra_config, created_at, updated_at)| {
+            let model_label = label.or(name.clone()).unwrap_or_default();
+            let model = match (id, name, provider, api_key, api_url, model_id, created_at, updated_at) {
+                (Some(id), Some(name), Some(provider), Some(api_key), Some(api_url), Some(model_id), Some(created_at), Some(updated_at)) => Some(ModelConfig {
+                    id,
+                    name,
+                    provider,
+                    api_key,
+                    api_url,
+                    model_id,
+                    extra_config,
+                    created_at,
+                    updated_at,
+                }
+                .masked()),
+                _ => None,
+            };
+            (model_label, model)
+        });
+        let model_label = model_info.as_ref().map(|(label, _)| label.clone());
+        let model = model_info.as_ref().and_then(|(_, model)| model.clone());
 
         // Get test item content snapshot
         let test_item_content: Option<String> = sqlx::query_as::<_, (String,)>(
-            "SELECT content_snapshot FROM task_test_items WHERE id = $1"
+            "SELECT content_snapshot FROM task_test_items WHERE id = $1",
         )
         .bind(&run.task_test_item_id)
         .fetch_optional(&pool)
@@ -705,37 +955,38 @@ pub async fn get_task_runs(
         .unwrap_or_default();
 
         // Get validation results enriched with checkpoint name and criterion.
-        // NOTE: DB column mapping:
-        //   status  → 'pass' | 'fail' | 'pending' | 'error'  (the enum decision)
-        //   result  → full LLM judge response text ("PASS. The output...")
-        //   comment → unused / null
-        // Frontend expects: result = enum, comment = explanation text — so we swap here.
         let raw_vr = sqlx::query_as::<_, ValidationResult>(
-            "SELECT id, eval_run_id, checkpoint_id, status, result, annotations, comment, created_at FROM validation_results WHERE eval_run_id = $1 ORDER BY created_at ASC"
+            "SELECT vr.id, vr.eval_run_id, vr.checkpoint_id, vr.status, vr.result, vr.annotations, vr.comment, vr.created_at
+             FROM validation_results vr
+             LEFT JOIN validation_checkpoints vc ON vc.id = vr.checkpoint_id
+             WHERE vr.eval_run_id = $1
+             ORDER BY COALESCE(vc.order_index, 2147483647) ASC, vr.created_at ASC"
         )
         .bind(&run.id)
         .fetch_all(&pool)
         .await
         .unwrap_or_default();
-        let validation_results: Vec<Value> = raw_vr.iter().map(|vr| {
-            let (cp_name, cp_criterion) = checkpoint_map.get(&vr.checkpoint_id)
-                .map(|(n, c)| (Some(n.clone()), Some(c.clone())))
-                .unwrap_or((None, None));
-            json!({
-                "id": vr.id,
-                "eval_run_id": vr.eval_run_id,
-                "checkpoint_id": vr.checkpoint_id,
-                "checkpoint_name": cp_name,
-                "checkpoint_criterion": cp_criterion,
-                "status": vr.status,
-                // result field carries the pass/fail enum so the frontend can use it for colour/text
-                "result": vr.status,
-                // comment carries the full LLM explanation (stored in the DB `result` column)
-                "comment": vr.result,
-                "annotations": vr.annotations,
-                "created_at": vr.created_at,
+        let validation_results: Vec<Value> = raw_vr
+            .iter()
+            .map(|vr| {
+                let (cp_name, cp_criterion) = checkpoint_map
+                    .get(&vr.checkpoint_id)
+                    .map(|(n, c)| (Some(n.clone()), Some(c.clone())))
+                    .unwrap_or((None, None));
+                json!({
+                    "id": vr.id,
+                    "eval_run_id": vr.eval_run_id,
+                    "checkpoint_id": vr.checkpoint_id,
+                    "checkpoint_name": cp_name,
+                    "checkpoint_criterion": cp_criterion,
+                    "status": vr.status,
+                    "result": vr.status,
+                    "comment": vr.comment.clone().or_else(|| vr.result.clone()),
+                    "annotations": vr.annotations,
+                    "created_at": vr.created_at,
+                })
             })
-        }).collect();
+            .collect();
 
         enriched.push(json!({
             "id": run.id,
@@ -752,6 +1003,8 @@ pub async fn get_task_runs(
             "duration_ms": run.duration_ms,
             "created_at": run.created_at,
             "completed_at": run.completed_at,
+            "prompt": prompt,
+            "model": model,
             "prompt_label": prompt_label,
             "prompt_is_baseline": prompt_is_baseline,
             "model_label": model_label,
@@ -789,7 +1042,7 @@ pub async fn create_checkpoint(
         oi
     } else {
         let max: (Option<i64>,) = sqlx::query_as(
-            "SELECT MAX(order_index) FROM validation_checkpoints WHERE task_id = $1"
+            "SELECT MAX(order_index) FROM validation_checkpoints WHERE task_id = $1",
         )
         .bind(&id)
         .fetch_one(&pool)
@@ -816,7 +1069,10 @@ pub async fn create_checkpoint(
     .fetch_one(&pool)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "success": true, "data": checkpoint }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "success": true, "data": checkpoint })),
+    ))
 }
 
 pub async fn update_checkpoint(
@@ -837,7 +1093,10 @@ pub async fn update_checkpoint(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound(format!("Checkpoint {} not found", checkpoint_id)));
+        return Err(AppError::NotFound(format!(
+            "Checkpoint {} not found",
+            checkpoint_id
+        )));
     }
 
     let checkpoint = sqlx::query_as::<_, ValidationCheckpoint>(
@@ -854,16 +1113,17 @@ pub async fn delete_checkpoint(
     State(pool): State<PgPool>,
     Path((task_id, checkpoint_id)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    let result = sqlx::query(
-        "DELETE FROM validation_checkpoints WHERE id=$1 AND task_id=$2"
-    )
-    .bind(&checkpoint_id)
-    .bind(&task_id)
-    .execute(&pool)
-    .await?;
+    let result = sqlx::query("DELETE FROM validation_checkpoints WHERE id=$1 AND task_id=$2")
+        .bind(&checkpoint_id)
+        .bind(&task_id)
+        .execute(&pool)
+        .await?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound(format!("Checkpoint {} not found", checkpoint_id)));
+        return Err(AppError::NotFound(format!(
+            "Checkpoint {} not found",
+            checkpoint_id
+        )));
     }
 
     Ok(Json(json!({ "success": true, "data": null })))
@@ -873,6 +1133,14 @@ pub async fn validate_task(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    let task = sqlx::query_as::<_, Task>(
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, validation_model_id, assessment_model_id, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
+    )
+    .bind(&id)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("Task {} not found", id)))?;
+
     let checkpoints = sqlx::query_as::<_, ValidationCheckpoint>(
         "SELECT id, task_id, name, criterion, order_index FROM validation_checkpoints WHERE task_id = $1 ORDER BY order_index ASC"
     )
@@ -881,7 +1149,9 @@ pub async fn validate_task(
     .await?;
 
     if checkpoints.is_empty() {
-        return Err(AppError::BadRequest("Task has no validation checkpoints".to_string()));
+        return Err(AppError::BadRequest(
+            "Task has no validation checkpoints".to_string(),
+        ));
     }
 
     let completed_runs = sqlx::query_as::<_, EvalRun>(
@@ -892,21 +1162,28 @@ pub async fn validate_task(
     .await?;
 
     if completed_runs.is_empty() {
-        return Err(AppError::BadRequest("No completed runs to validate".to_string()));
+        return Err(AppError::BadRequest(
+            "No completed runs to validate".to_string(),
+        ));
     }
 
-    let task_model = sqlx::query_as::<_, TaskModel>(
-        "SELECT id, task_id, model_config_id, label FROM task_models WHERE task_id = $1 LIMIT 1"
+    let task_models = sqlx::query_as::<_, TaskModel>(
+        "SELECT id, task_id, model_config_id, label FROM task_models WHERE task_id = $1 ORDER BY id ASC",
     )
     .bind(&id)
-    .fetch_optional(&pool)
+    .fetch_all(&pool)
     .await?
-    .ok_or_else(|| AppError::BadRequest("Task has no models configured".to_string()))?;
+    ;
+
+    let judge_model_id = resolve_stage_model_id(task.validation_model_id.as_ref(), &task_models)
+        .ok_or_else(|| {
+            AppError::BadRequest("Task has no validation model configured".to_string())
+        })?;
 
     let judge_model = sqlx::query_as::<_, ModelConfig>(
         "SELECT id, name, provider, api_key, api_url, model_id, extra_config, created_at, updated_at FROM model_configs WHERE id = $1"
     )
-    .bind(&task_model.model_config_id)
+    .bind(&judge_model_id)
     .fetch_optional(&pool)
     .await?
     .ok_or_else(|| AppError::BadRequest("Judge model config not found".to_string()))?;
@@ -915,8 +1192,11 @@ pub async fn validate_task(
 
     // Get task concurrency setting
     let concurrency: (i64,) = sqlx::query_as("SELECT concurrency FROM tasks WHERE id=$1")
-        .bind(&id).fetch_one(&pool).await.unwrap_or((3,));
-    let concurrency = concurrency.0.max(1).min(20) as usize;
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or((3,));
+    let concurrency = concurrency.0.clamp(1, 20) as usize;
 
     tokio::spawn(async move {
         use std::sync::Arc;
@@ -930,14 +1210,18 @@ pub async fn validate_task(
         // Pre-insert all pending validation_results (only for pairs not already done)
         let mut work_units: Vec<(String, String, String)> = Vec::new(); // (vr_id, run_id, cp_id)
         for run in &completed_runs {
-            if run.output_content.is_none() { continue; }
+            if run.output_content.is_none() {
+                continue;
+            }
             for checkpoint in &checkpoints {
                 let exists: (i64,) = sqlx::query_as(
                     "SELECT COUNT(*) FROM validation_results WHERE eval_run_id=$1 AND checkpoint_id=$2"
                 )
                 .bind(&run.id).bind(&checkpoint.id)
                 .fetch_one(&pool_clone).await.unwrap_or((0,));
-                if exists.0 > 0 { continue; }
+                if exists.0 > 0 {
+                    continue;
+                }
 
                 let vr_id = Uuid::new_v4().to_string();
                 let _ = sqlx::query(
@@ -951,10 +1235,14 @@ pub async fn validate_task(
 
         // Build a lookup map: checkpoint_id -> (criterion, name)
         let cp_map: std::collections::HashMap<String, (String, String)> = checkpoints
-            .iter().map(|c| (c.id.clone(), (c.criterion.clone(), c.name.clone()))).collect();
+            .iter()
+            .map(|c| (c.id.clone(), (c.criterion.clone(), c.name.clone())))
+            .collect();
         // Build run output map
         let run_output_map: std::collections::HashMap<String, String> = completed_runs
-            .iter().filter_map(|r| r.output_content.as_ref().map(|o| (r.id.clone(), o.clone()))).collect();
+            .iter()
+            .filter_map(|r| r.output_content.as_ref().map(|o| (r.id.clone(), o.clone())))
+            .collect();
 
         // Execute all validation calls concurrently
         let mut join_set: JoinSet<()> = JoinSet::new();
@@ -963,7 +1251,7 @@ pub async fn validate_task(
                 Some(o) => o.clone(),
                 None => continue,
             };
-            let (criterion, _) = match cp_map.get(&cp_id) {
+            let (criterion, checkpoint_name) = match cp_map.get(&cp_id) {
                 Some(c) => c.clone(),
                 None => continue,
             };
@@ -975,22 +1263,20 @@ pub async fn validate_task(
             join_set.spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
 
-                let validation_prompt = format!(
-                    "You are evaluating an AI model's output against a specific criterion.\n\nCriterion: {}\n\nModel Output:\n{}\n\nDoes the output satisfy the criterion? Respond with PASS or FAIL followed by a brief explanation.",
-                    criterion, output
-                );
+                let validation_prompt =
+                    build_validation_prompt(&checkpoint_name, &criterion, &output);
                 let messages = vec![InputMessage { role: "user".to_string(), content: validation_prompt }];
 
                 match client.call(&jm.api_url, &jm.api_key, &jm.model_id, messages).await {
                     Ok(result) => {
-                        let status = if result.content.to_uppercase().starts_with("PASS") { "pass" } else { "fail" };
-                        let _ = sqlx::query("UPDATE validation_results SET status=$1, result=$2 WHERE id=$3")
-                            .bind(status).bind(&result.content).bind(&vr_id)
+                        let (status, comment) = parse_validation_response(&result.content);
+                        let _ = sqlx::query("UPDATE validation_results SET status=$1, result=$2, comment=$3 WHERE id=$4")
+                            .bind(status).bind(&result.content).bind(comment).bind(&vr_id)
                             .execute(&pool).await;
                     }
                     Err(e) => {
-                        let _ = sqlx::query("UPDATE validation_results SET status='error', result=$1 WHERE id=$2")
-                            .bind(&e).bind(&vr_id).execute(&pool).await;
+                        let _ = sqlx::query("UPDATE validation_results SET status='error', result=$1, comment=$2 WHERE id=$3")
+                            .bind(&e).bind(&e).bind(&vr_id).execute(&pool).await;
                     }
                 }
             });
@@ -999,7 +1285,9 @@ pub async fn validate_task(
         while join_set.join_next().await.is_some() {}
     });
 
-    Ok(Json(json!({ "success": true, "data": { "message": "Validation started" } })))
+    Ok(Json(
+        json!({ "success": true, "data": { "message": "Validation started" } }),
+    ))
 }
 
 pub async fn get_assessment(
@@ -1021,16 +1309,17 @@ pub async fn create_assessment(
     Path(id): Path<String>,
     AppJson(payload): AppJson<ManualAssessRequest>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
-    let run_exists: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM eval_runs WHERE id=$1 AND task_id=$2"
-    )
-    .bind(&payload.eval_run_id)
-    .bind(&id)
-    .fetch_one(&pool)
-    .await?;
+    let run_exists: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE id=$1 AND task_id=$2")
+            .bind(&payload.eval_run_id)
+            .bind(&id)
+            .fetch_one(&pool)
+            .await?;
 
     if run_exists.0 == 0 {
-        return Err(AppError::NotFound("Eval run not found in this task".to_string()));
+        return Err(AppError::NotFound(
+            "Eval run not found in this task".to_string(),
+        ));
     }
 
     let ar_id = Uuid::new_v4().to_string();
@@ -1056,13 +1345,24 @@ pub async fn create_assessment(
     .fetch_one(&pool)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "success": true, "data": result }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "success": true, "data": result })),
+    ))
 }
 
 pub async fn auto_assess_task(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    let task = sqlx::query_as::<_, Task>(
+        "SELECT id, name, description, eval_type, status, dataset_id, validation_config, assessment_mode, assessment_config, validation_model_id, assessment_model_id, repeat_count, concurrency, created_at, updated_at, started_at, completed_at FROM tasks WHERE id = $1"
+    )
+    .bind(&id)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("Task {} not found", id)))?;
+
     let completed_runs = sqlx::query_as::<_, EvalRun>(
         "SELECT id, task_id, task_prompt_id, task_model_id, task_test_item_id, repeat_index, status, input_messages, output_content, error_message, tokens_used, duration_ms, created_at, completed_at FROM eval_runs WHERE task_id = $1 AND status = 'completed'"
     )
@@ -1071,29 +1371,39 @@ pub async fn auto_assess_task(
     .await?;
 
     if completed_runs.is_empty() {
-        return Err(AppError::BadRequest("No completed runs to assess".to_string()));
+        return Err(AppError::BadRequest(
+            "No completed runs to assess".to_string(),
+        ));
     }
 
-    let task_model = sqlx::query_as::<_, TaskModel>(
-        "SELECT id, task_id, model_config_id, label FROM task_models WHERE task_id = $1 LIMIT 1"
+    let task_models = sqlx::query_as::<_, TaskModel>(
+        "SELECT id, task_id, model_config_id, label FROM task_models WHERE task_id = $1 ORDER BY id ASC",
     )
     .bind(&id)
-    .fetch_optional(&pool)
+    .fetch_all(&pool)
     .await?
-    .ok_or_else(|| AppError::BadRequest("Task has no models configured".to_string()))?;
+    ;
+
+    let judge_model_id = resolve_stage_model_id(task.assessment_model_id.as_ref(), &task_models)
+        .ok_or_else(|| {
+            AppError::BadRequest("Task has no assessment model configured".to_string())
+        })?;
 
     let judge_model = sqlx::query_as::<_, ModelConfig>(
         "SELECT id, name, provider, api_key, api_url, model_id, extra_config, created_at, updated_at FROM model_configs WHERE id = $1"
     )
-    .bind(&task_model.model_config_id)
+    .bind(&judge_model_id)
     .fetch_optional(&pool)
     .await?
     .ok_or_else(|| AppError::BadRequest("Judge model config not found".to_string()))?;
 
     // Get task concurrency setting
     let concurrency_setting: (i64,) = sqlx::query_as("SELECT concurrency FROM tasks WHERE id=$1")
-        .bind(&id).fetch_one(&pool).await.unwrap_or((3,));
-    let concurrency = concurrency_setting.0.max(1).min(20) as usize;
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or((3,));
+    let concurrency = concurrency_setting.0.clamp(1, 20) as usize;
 
     let pool_clone = pool.clone();
 
@@ -1125,10 +1435,15 @@ pub async fn auto_assess_task(
             };
 
             let existing: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM assessment_results WHERE eval_run_id=$1 AND mode='auto'"
+                "SELECT COUNT(*) FROM assessment_results WHERE eval_run_id=$1 AND mode='auto'",
             )
-            .bind(&run.id).fetch_one(&pool_clone).await.unwrap_or((0,));
-            if existing.0 > 0 { continue; }
+            .bind(&run.id)
+            .fetch_one(&pool_clone)
+            .await
+            .unwrap_or((0,));
+            if existing.0 > 0 {
+                continue;
+            }
 
             let sem = semaphore.clone();
             let pool = pool_clone.clone();
@@ -1188,7 +1503,9 @@ pub async fn auto_assess_task(
         while join_set.join_next().await.is_some() {}
     });
 
-    Ok(Json(json!({ "success": true, "data": { "message": "Auto assessment started" } })))
+    Ok(Json(
+        json!({ "success": true, "data": { "message": "Auto assessment started" } }),
+    ))
 }
 
 pub async fn manual_assess_task(
@@ -1212,17 +1529,22 @@ pub async fn get_results_overview(
         return Err(AppError::NotFound(format!("任务 {} 不存在", id)));
     }
 
-    let total_runs: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM eval_runs WHERE task_id=$1"
-    ).bind(&id).fetch_one(&pool).await?;
+    let total_runs: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await?;
 
-    let completed_runs: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='completed'"
-    ).bind(&id).fetch_one(&pool).await?;
+    let completed_runs: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='completed'")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await?;
 
-    let failed_runs: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='failed'"
-    ).bind(&id).fetch_one(&pool).await?;
+    let failed_runs: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='failed'")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await?;
 
     let avg_tokens: (Option<f64>,) = sqlx::query_as(
         "SELECT AVG(CAST(tokens_used AS DOUBLE PRECISION)) FROM eval_runs WHERE task_id=$1 AND status='completed'"
@@ -1272,42 +1594,45 @@ pub async fn get_results_overview(
          ORDER BY tp.is_baseline DESC, tp.id ASC"
     ).bind(&id).fetch_all(&pool).await?;
 
-    let by_prompt: Vec<Value> = by_prompt_rows.iter().map(|row| {
-        use sqlx::Row;
-        let total: i64 = row.try_get("total").unwrap_or(0);
-        let completed: i64 = row.try_get("completed").unwrap_or(0);
-        let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
-        let validation_total: i64 = row.try_get("validation_total").unwrap_or(0);
-        let avg_score: Option<f64> = row.try_get("avg_score").ok().flatten();
-        let label: Option<String> = row.try_get("label").ok().flatten();
-        let prompt_name: Option<String> = row.try_get("prompt_name").ok().flatten();
-        let prompt_version: Option<String> = row.try_get("prompt_version").ok().flatten();
-        let prompt_id: String = row.try_get("prompt_id").unwrap_or_default();
-        let is_baseline: bool = row.try_get("is_baseline").unwrap_or(false);
-        // Only show pass_rate if validation has been run
-        let pass_rate: Option<f64> = if validation_total > 0 {
-            Some(pass_count as f64 / validation_total as f64)
-        } else {
-            None
-        };
-        let display_label = label.or_else(|| {
-            match (prompt_name, prompt_version) {
-                (Some(n), Some(v)) => Some(format!("{} ({})", n, v)),
-                (Some(n), None) => Some(n),
-                _ => None,
-            }
-        }).unwrap_or_else(|| prompt_id[..8].to_string());
-        json!({
-            "label": display_label,
-            "prompt_id": prompt_id,
-            "is_baseline": is_baseline,
-            "total": total,
-            "completed": completed,
-            "pass_count": pass_count,
-            "pass_rate": pass_rate,
-            "avg_score": avg_score
+    let by_prompt: Vec<Value> = by_prompt_rows
+        .iter()
+        .map(|row| {
+            use sqlx::Row;
+            let total: i64 = row.try_get("total").unwrap_or(0);
+            let completed: i64 = row.try_get("completed").unwrap_or(0);
+            let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
+            let validation_total: i64 = row.try_get("validation_total").unwrap_or(0);
+            let avg_score: Option<f64> = row.try_get("avg_score").ok().flatten();
+            let label: Option<String> = row.try_get("label").ok().flatten();
+            let prompt_name: Option<String> = row.try_get("prompt_name").ok().flatten();
+            let prompt_version: Option<String> = row.try_get("prompt_version").ok().flatten();
+            let prompt_id: String = row.try_get("prompt_id").unwrap_or_default();
+            let is_baseline: bool = row.try_get("is_baseline").unwrap_or(false);
+            // Only show pass_rate if validation has been run
+            let pass_rate: Option<f64> = if validation_total > 0 {
+                Some(pass_count as f64 / validation_total as f64)
+            } else {
+                None
+            };
+            let display_label = label
+                .or_else(|| match (prompt_name, prompt_version) {
+                    (Some(n), Some(v)) => Some(format!("{} ({})", n, v)),
+                    (Some(n), None) => Some(n),
+                    _ => None,
+                })
+                .unwrap_or_else(|| prompt_id[..8].to_string());
+            json!({
+                "label": display_label,
+                "prompt_id": prompt_id,
+                "is_baseline": is_baseline,
+                "total": total,
+                "completed": completed,
+                "pass_count": pass_count,
+                "pass_rate": pass_rate,
+                "avg_score": avg_score
+            })
         })
-    }).collect();
+        .collect();
 
     // By model grouping — use subqueries to avoid JOIN multiplication
     let by_model_rows = sqlx::query(
@@ -1329,32 +1654,37 @@ pub async fn get_results_overview(
          WHERE tm.task_id = $1"
     ).bind(&id).fetch_all(&pool).await?;
 
-    let by_model: Vec<Value> = by_model_rows.iter().map(|row| {
-        use sqlx::Row;
-        let total: i64 = row.try_get("total").unwrap_or(0);
-        let completed: i64 = row.try_get("completed").unwrap_or(0);
-        let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
-        let validation_total: i64 = row.try_get("validation_total").unwrap_or(0);
-        let avg_score: Option<f64> = row.try_get("avg_score").ok().flatten();
-        let label: Option<String> = row.try_get("label").ok().flatten();
-        let model_name: Option<String> = row.try_get("model_name").ok().flatten();
-        let model_id: String = row.try_get("model_config_id").unwrap_or_default();
-        let pass_rate: Option<f64> = if validation_total > 0 {
-            Some(pass_count as f64 / validation_total as f64)
-        } else {
-            None
-        };
-        let display_label = label.or(model_name).unwrap_or_else(|| model_id[..8].to_string());
-        json!({
-            "label": display_label,
-            "model_id": model_id,
-            "total": total,
-            "completed": completed,
-            "pass_count": pass_count,
-            "pass_rate": pass_rate,
-            "avg_score": avg_score
+    let by_model: Vec<Value> = by_model_rows
+        .iter()
+        .map(|row| {
+            use sqlx::Row;
+            let total: i64 = row.try_get("total").unwrap_or(0);
+            let completed: i64 = row.try_get("completed").unwrap_or(0);
+            let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
+            let validation_total: i64 = row.try_get("validation_total").unwrap_or(0);
+            let avg_score: Option<f64> = row.try_get("avg_score").ok().flatten();
+            let label: Option<String> = row.try_get("label").ok().flatten();
+            let model_name: Option<String> = row.try_get("model_name").ok().flatten();
+            let model_id: String = row.try_get("model_config_id").unwrap_or_default();
+            let pass_rate: Option<f64> = if validation_total > 0 {
+                Some(pass_count as f64 / validation_total as f64)
+            } else {
+                None
+            };
+            let display_label = label
+                .or(model_name)
+                .unwrap_or_else(|| model_id[..8].to_string());
+            json!({
+                "label": display_label,
+                "model_id": model_id,
+                "total": total,
+                "completed": completed,
+                "pass_count": pass_count,
+                "pass_rate": pass_rate,
+                "avg_score": avg_score
+            })
         })
-    }).collect();
+        .collect();
 
     // Per-checkpoint breakdown (only populated if validation has been run)
     let checkpoint_breakdown_rows = sqlx::query(
@@ -1370,25 +1700,28 @@ pub async fn get_results_overview(
          ORDER BY vc.order_index ASC"
     ).bind(&id).fetch_all(&pool).await.unwrap_or_default();
 
-    let by_checkpoint: Vec<Value> = checkpoint_breakdown_rows.iter().map(|row| {
-        use sqlx::Row;
-        let name: String = row.try_get("name").unwrap_or_default();
-        let criterion: String = row.try_get("criterion").unwrap_or_default();
-        let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
-        let eval_count: i64 = row.try_get("eval_count").unwrap_or(0);
-        let pass_rate: Option<f64> = if eval_count > 0 {
-            Some(pass_count as f64 / eval_count as f64)
-        } else {
-            None
-        };
-        json!({
-            "name": name,
-            "criterion": criterion,
-            "pass_count": pass_count,
-            "eval_count": eval_count,
-            "pass_rate": pass_rate,
+    let by_checkpoint: Vec<Value> = checkpoint_breakdown_rows
+        .iter()
+        .map(|row| {
+            use sqlx::Row;
+            let name: String = row.try_get("name").unwrap_or_default();
+            let criterion: String = row.try_get("criterion").unwrap_or_default();
+            let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
+            let eval_count: i64 = row.try_get("eval_count").unwrap_or(0);
+            let pass_rate: Option<f64> = if eval_count > 0 {
+                Some(pass_count as f64 / eval_count as f64)
+            } else {
+                None
+            };
+            json!({
+                "name": name,
+                "criterion": criterion,
+                "pass_count": pass_count,
+                "eval_count": eval_count,
+                "pass_rate": pass_rate,
+            })
         })
-    }).collect();
+        .collect();
 
     // Checkpoint × Prompt pivot: for each (checkpoint, prompt version) pair, pass rate
     // baseline-first ordering so delta column always compares against baseline
@@ -1408,20 +1741,27 @@ pub async fn get_results_overview(
          ORDER BY vc.order_index ASC, tp.is_baseline DESC, tp.id ASC"
     ).bind(&id).fetch_all(&pool).await.unwrap_or_default();
 
-    let by_checkpoint_prompt: Vec<Value> = cp_prompt_rows.iter().map(|row| {
-        use sqlx::Row;
-        let cp_name: String = row.try_get("cp_name").unwrap_or_default();
-        let criterion: String = row.try_get("criterion").unwrap_or_default();
-        let order_index: i32 = row.try_get("order_index").unwrap_or(0);
-        let group_label: String = row.try_get("group_label").unwrap_or_default();
-        let is_baseline: bool = row.try_get("is_baseline").unwrap_or(false);
-        let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
-        let eval_count: i64 = row.try_get("eval_count").unwrap_or(0);
-        let pass_rate: Option<f64> = if eval_count > 0 { Some(pass_count as f64 / eval_count as f64) } else { None };
-        json!({ "checkpoint_name": cp_name, "criterion": criterion, "order_index": order_index,
+    let by_checkpoint_prompt: Vec<Value> = cp_prompt_rows
+        .iter()
+        .map(|row| {
+            use sqlx::Row;
+            let cp_name: String = row.try_get("cp_name").unwrap_or_default();
+            let criterion: String = row.try_get("criterion").unwrap_or_default();
+            let order_index: i32 = row.try_get("order_index").unwrap_or(0);
+            let group_label: String = row.try_get("group_label").unwrap_or_default();
+            let is_baseline: bool = row.try_get("is_baseline").unwrap_or(false);
+            let pass_count: i64 = row.try_get("pass_count").unwrap_or(0);
+            let eval_count: i64 = row.try_get("eval_count").unwrap_or(0);
+            let pass_rate: Option<f64> = if eval_count > 0 {
+                Some(pass_count as f64 / eval_count as f64)
+            } else {
+                None
+            };
+            json!({ "checkpoint_name": cp_name, "criterion": criterion, "order_index": order_index,
                 "group_label": group_label, "is_baseline": is_baseline,
                 "pass_count": pass_count, "eval_count": eval_count, "pass_rate": pass_rate })
-    }).collect();
+        })
+        .collect();
 
     // Checkpoint × Model pivot
     let cp_model_rows = sqlx::query(
@@ -1437,8 +1777,12 @@ pub async fn get_results_overview(
          LEFT JOIN validation_results vr ON vr.eval_run_id = er.id AND vr.checkpoint_id = vc.id
          WHERE vc.task_id = $1 AND tm.task_id = $1
          GROUP BY vc.id, vc.name, vc.criterion, vc.order_index, tm.id, tm.label, mc.name
-         ORDER BY vc.order_index ASC, tm.id ASC"
-    ).bind(&id).fetch_all(&pool).await.unwrap_or_default();
+         ORDER BY vc.order_index ASC, tm.id ASC",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
 
     let by_checkpoint_model: Vec<Value> = cp_model_rows.iter().map(|row| {
         use sqlx::Row;
@@ -1492,51 +1836,77 @@ pub async fn get_task_progress(
     // --- Inference progress ---
     let (total_runs, completed_runs, failed_runs): (i64, i64, i64) = {
         let r: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1")
-            .bind(&id).fetch_one(&pool).await?;
-        let c: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='completed'")
-            .bind(&id).fetch_one(&pool).await?;
-        let f: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='failed'")
-            .bind(&id).fetch_one(&pool).await?;
+            .bind(&id)
+            .fetch_one(&pool)
+            .await?;
+        let c: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='completed'",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await?;
+        let f: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM eval_runs WHERE task_id=$1 AND status='failed'")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await?;
         (r.0, c.0, f.0)
     };
 
     // --- Validation progress ---
-    let checkpoint_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM validation_checkpoints WHERE task_id=$1"
-    ).bind(&id).fetch_one(&pool).await?;
+    let checkpoint_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM validation_checkpoints WHERE task_id=$1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await?;
 
     let validation_expected = completed_runs * checkpoint_count.0;
 
     let val_done: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM validation_results vr
          JOIN eval_runs er ON vr.eval_run_id = er.id
-         WHERE er.task_id=$1 AND vr.status IN ('pass','fail','error')"
-    ).bind(&id).fetch_one(&pool).await?;
+         WHERE er.task_id=$1 AND vr.status IN ('pass','fail','error')",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await?;
 
     let val_pending: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM validation_results vr
          JOIN eval_runs er ON vr.eval_run_id = er.id
-         WHERE er.task_id=$1 AND vr.status='pending'"
-    ).bind(&id).fetch_one(&pool).await?;
+         WHERE er.task_id=$1 AND vr.status='pending'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await?;
 
     let val_pass: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM validation_results vr
          JOIN eval_runs er ON vr.eval_run_id = er.id
-         WHERE er.task_id=$1 AND vr.status='pass'"
-    ).bind(&id).fetch_one(&pool).await?;
+         WHERE er.task_id=$1 AND vr.status='pass'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await?;
 
     let val_fail: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM validation_results vr
          JOIN eval_runs er ON vr.eval_run_id = er.id
-         WHERE er.task_id=$1 AND vr.status='fail'"
-    ).bind(&id).fetch_one(&pool).await?;
+         WHERE er.task_id=$1 AND vr.status='fail'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await?;
 
     // --- Assessment progress (auto only) ---
     let assess_done: (i64,) = sqlx::query_as(
         "SELECT COUNT(DISTINCT ar.eval_run_id) FROM assessment_results ar
          JOIN eval_runs er ON ar.eval_run_id = er.id
-         WHERE er.task_id=$1 AND ar.mode='auto'"
-    ).bind(&id).fetch_one(&pool).await?;
+         WHERE er.task_id=$1 AND ar.mode='auto'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await?;
 
     Ok(Json(json!({
         "success": true,
@@ -1597,4 +1967,65 @@ pub async fn get_results_details(
     }
 
     Ok(Json(json!({ "success": true, "data": details })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_validation_prompt, parse_validation_response, resolve_stage_model_id};
+    use crate::models::TaskModel;
+
+    #[test]
+    fn build_validation_prompt_mentions_chinese_json_and_checkpoint_context() {
+        let prompt = build_validation_prompt(
+            "事实准确性",
+            "答案必须忠于原文，不得添加原文没有的信息",
+            "模型输出",
+        );
+
+        assert!(prompt.contains("中文评测裁判"));
+        assert!(prompt.contains("校验点名称：事实准确性"));
+        assert!(prompt.contains("校验标准：答案必须忠于原文，不得添加原文没有的信息"));
+        assert!(prompt.contains("模型输出：\n模型输出"));
+        assert!(prompt.contains("请只返回 JSON"));
+        assert!(prompt.contains("请用中文简洁说明判断理由"));
+    }
+
+    #[test]
+    fn parse_validation_response_reads_json_status_and_comment() {
+        let (status, comment) =
+            parse_validation_response(r#"{"result":"通过","comment":"符合事实准确性要求"}"#);
+
+        assert_eq!(status, "pass");
+        assert_eq!(comment, "符合事实准确性要求");
+    }
+
+    #[test]
+    fn resolve_stage_model_id_prefers_explicit_model() {
+        let task_models = vec![TaskModel {
+            id: "task-model-1".to_string(),
+            task_id: "task-1".to_string(),
+            model_config_id: "inference-model".to_string(),
+            label: None,
+        }];
+
+        assert_eq!(
+            resolve_stage_model_id(Some(&"judge-model".to_string()), &task_models),
+            Some("judge-model".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_stage_model_id_falls_back_to_first_inference_model() {
+        let task_models = vec![TaskModel {
+            id: "task-model-1".to_string(),
+            task_id: "task-1".to_string(),
+            model_config_id: "inference-model".to_string(),
+            label: None,
+        }];
+
+        assert_eq!(
+            resolve_stage_model_id(None, &task_models),
+            Some("inference-model".to_string())
+        );
+    }
 }

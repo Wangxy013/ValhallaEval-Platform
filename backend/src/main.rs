@@ -42,6 +42,10 @@ fn api_v1_routes() -> Router<PgPool> {
         .route("/datasets/:id/items", get(routes::datasets::list_items))
         .route("/datasets/:id/items", post(routes::datasets::create_item))
         .route(
+            "/datasets/:id/items/batch",
+            post(routes::datasets::create_items_batch),
+        )
+        .route(
             "/datasets/:id/items/:item_id",
             delete(routes::datasets::delete_item),
         )
@@ -56,8 +60,14 @@ fn api_v1_routes() -> Router<PgPool> {
         .route("/tasks/:id/resume", post(routes::tasks::resume_task))
         .route("/tasks/:id/runs", get(routes::tasks::get_task_runs))
         // Checkpoints
-        .route("/tasks/:id/checkpoints", get(routes::tasks::list_checkpoints))
-        .route("/tasks/:id/checkpoints", post(routes::tasks::create_checkpoint))
+        .route(
+            "/tasks/:id/checkpoints",
+            get(routes::tasks::list_checkpoints),
+        )
+        .route(
+            "/tasks/:id/checkpoints",
+            post(routes::tasks::create_checkpoint),
+        )
         .route(
             "/tasks/:id/checkpoints/:checkpoint_id",
             put(routes::tasks::update_checkpoint),
@@ -70,7 +80,10 @@ fn api_v1_routes() -> Router<PgPool> {
         .route("/tasks/:id/validate", post(routes::tasks::validate_task))
         // Assessment
         .route("/tasks/:id/assessment", get(routes::tasks::get_assessment))
-        .route("/tasks/:id/assessment", post(routes::tasks::create_assessment))
+        .route(
+            "/tasks/:id/assessment",
+            post(routes::tasks::create_assessment),
+        )
         .route("/tasks/:id/assess", post(routes::tasks::auto_assess_task))
         .route(
             "/tasks/:id/assess/manual",
@@ -88,6 +101,23 @@ fn api_v1_routes() -> Router<PgPool> {
         .route("/tasks/:id/progress", get(routes::tasks::get_task_progress))
 }
 
+fn build_app(pool: PgPool) -> Router {
+    // CORS layer — allow all origins for development
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let api_v1 = api_v1_routes();
+    Router::new()
+        .route("/health", get(healthcheck))
+        .nest("/api/v1", api_v1.clone())
+        .nest("/v1", api_v1)
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+        .with_state(pool)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file
@@ -96,14 +126,13 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgresql://postgres:password@localhost:5432/eval_tools".to_string());
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://postgres:password@localhost:5432/eval_tools".to_string());
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse()
@@ -114,21 +143,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Running migrations");
     db::run_migrations(&pool).await?;
-
-    // CORS layer — allow all origins for development
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    let api_v1 = api_v1_routes();
-    let app = Router::new()
-        .route("/health", get(healthcheck))
-        .nest("/api/v1", api_v1.clone())
-        .nest("/v1", api_v1)
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .with_state(pool);
+    let app = build_app(pool);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Server listening on {}", addr);
@@ -137,4 +152,48 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_app;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn batch_dataset_items_route_is_registered() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://postgres:password@localhost:5432/eval_tools")
+            .expect("lazy pool");
+        let app = build_app(pool);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/datasets/test-dataset/items/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"contents":["题目1","题目2"]}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("read body")
+            .to_bytes();
+        let body_text = String::from_utf8_lossy(&body);
+
+        assert_ne!(
+            status,
+            axum::http::StatusCode::METHOD_NOT_ALLOWED,
+            "route should exist and not return 405: {body_text}"
+        );
+    }
 }

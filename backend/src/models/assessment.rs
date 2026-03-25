@@ -12,6 +12,7 @@ pub struct AssessmentResult {
     pub created_at: i64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateAssessmentResult {
     pub eval_run_id: String,

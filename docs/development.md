@@ -92,6 +92,12 @@ chmod +x dev.sh
 
 `dev.sh` 会依次启动 PostgreSQL、后端、前端，并在 Ctrl+C 时统一清理进程。
 
+### 最近新增的开发约束
+
+- 任务创建采用三阶段模型配置：推理模型、校验模型、评估模型分别建模，其中校验/评估阶段各固定 1 个模型。
+- 校验 prompt 必须同时带上校验点名称、校验标准和模型输出，并要求裁判以中文 JSON 返回。
+- 模型配置接口返回的 `api_key` 一律为脱敏值；编辑模型时空白 `api_key` 代表“保持原密钥”。
+
 ---
 
 ## 项目结构详解
@@ -314,6 +320,16 @@ sqlx migrate info
 - API 函数命名使用 camelCase 动词开头（`getTask`, `listRuns`）
 - 避免 `any` 类型，优先在 `types/index.ts` 定义接口
 - 使用函数式组件 + Hooks，不使用 class 组件
+- 前端纯逻辑测试使用 Node 内置测试运行器，例如：
+
+```bash
+cd frontend
+node --test \
+  src/pages/TestDataManagement/csv.test.ts \
+  src/pages/TaskResult/helpers.test.ts \
+  src/pages/NewTask/helpers.test.ts \
+  src/pages/ModelManagement/helpers.test.ts
+```
 
 ---
 

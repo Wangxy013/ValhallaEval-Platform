@@ -1,10 +1,11 @@
-import { useState, useRef } from 'react'
+import { useState } from 'react'
 import {
   Table, Button, Modal, Form, Input, Space, Popconfirm, message,
   Card, Row, Col, Typography, List, Divider, Upload,
 } from 'antd'
 import {
   PlusOutlined, DeleteOutlined, InboxOutlined, UploadOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
@@ -13,6 +14,11 @@ import {
   listTestItems, createTestItem, createTestItemsBatch, deleteTestItem,
 } from '../../api/datasets'
 import type { TestDataset, TestItem } from '../../types'
+import {
+  parseCsvFirstColumn,
+  SAMPLE_DATASET_CSV_CONTENT,
+  SAMPLE_DATASET_CSV_FILENAME,
+} from './csv'
 
 const { Title, Text } = Typography
 const { TextArea } = Input
@@ -24,7 +30,6 @@ export default function TestDataManagementPage() {
   const [addItemModalOpen, setAddItemModalOpen] = useState(false)
   const [batchText, setBatchText] = useState('')
   const [singleContent, setSingleContent] = useState('')
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const [datasetForm] = Form.useForm<{ name: string; description: string }>()
 
   const { data: datasets = [], isLoading: datasetsLoading } = useQuery({
@@ -99,14 +104,22 @@ export default function TestDataManagementPage() {
     const reader = new FileReader()
     reader.onload = (e) => {
       const text = e.target?.result as string
-      const lines = text.split('\n')
-        .map(l => l.split(',')[0].trim().replace(/^["']|["']$/g, ''))
-        .filter(l => l.length > 0)
+      const lines = parseCsvFirstColumn(text)
       if (lines.length === 0) { message.warning('CSV文件为空或格式不正确'); return }
       createBatchMutation.mutate(lines)
     }
     reader.readAsText(file)
     return false
+  }
+
+  function handleDownloadSampleCsv() {
+    const blob = new Blob([SAMPLE_DATASET_CSV_CONTENT], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = SAMPLE_DATASET_CSV_FILENAME
+    link.click()
+    URL.revokeObjectURL(url)
   }
 
   const itemColumns = [
@@ -237,6 +250,9 @@ export default function TestDataManagementPage() {
                   >
                     <Button icon={<UploadOutlined />}>导入CSV</Button>
                   </Upload>
+                  <Button icon={<DownloadOutlined />} onClick={handleDownloadSampleCsv}>
+                    下载样例CSV
+                  </Button>
                 </Space>
               }
             >
@@ -338,19 +354,6 @@ export default function TestDataManagementPage() {
           </Text>
         </div>
       </Modal>
-
-      {/* hidden file input for CSV */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".csv"
-        style={{ display: 'none' }}
-        onChange={e => {
-          const file = e.target.files?.[0]
-          if (file) handleCSVImport(file)
-          e.target.value = ''
-        }}
-      />
     </div>
   )
 }

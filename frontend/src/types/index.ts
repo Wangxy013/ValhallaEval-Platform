@@ -58,6 +58,10 @@ export interface Task {
   validation_config?: ValidationConfig;
   assessment_mode: AssessmentMode;
   assessment_config?: Record<string, unknown>;
+  validation_model_id?: string;
+  assessment_model_id?: string;
+  validation_model?: ModelConfig;
+  assessment_model?: ModelConfig;
   repeat_count: number;
   concurrency: number;
   prompts?: TaskPrompt[];

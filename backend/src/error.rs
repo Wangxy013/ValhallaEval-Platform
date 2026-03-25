@@ -21,6 +21,7 @@ pub enum AppError {
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
 
+    #[allow(dead_code)]
     #[error("LLM error: {0}")]
     Llm(String),
 
@@ -35,11 +36,17 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Database(e) => {
                 tracing::error!("Database error: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {}", e),
+                )
             }
             AppError::Internal(e) => {
                 tracing::error!("Internal error: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Internal error: {}", e))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Internal error: {}", e),
+                )
             }
             AppError::Llm(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
@@ -67,10 +74,7 @@ where
 {
     type Rejection = AppJsonRejection;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(req, state).await {
             Ok(axum::Json(value)) => Ok(AppJson(value)),
             Err(rejection) => Err(AppJsonRejection(rejection)),
@@ -84,10 +88,6 @@ impl IntoResponse for AppJsonRejection {
     fn into_response(self) -> Response {
         let status = self.0.status();
         let message = self.0.body_text();
-        (
-            status,
-            Json(json!({ "success": false, "error": message })),
-        )
-            .into_response()
+        (status, Json(json!({ "success": false, "error": message }))).into_response()
     }
 }

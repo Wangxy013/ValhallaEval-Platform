@@ -8,6 +8,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { listModels, createModel, updateModel, deleteModel } from '../../api/models'
 import type { ModelConfig } from '../../types'
+import { buildModelPayload, maskApiKey, type ModelFormValues } from './helpers'
 
 const { Title } = Typography
 
@@ -115,14 +116,12 @@ const providerLabels: Record<string, string> = Object.fromEntries(
   PROVIDERS.map(p => [p.value, p.label.split(' · ')[0]])
 )
 
-type FormValues = Omit<ModelConfig, 'id' | 'created_at' | 'updated_at' | 'extra_config'>
-
 export default function ModelManagementPage() {
   const queryClient = useQueryClient()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [editing, setEditing] = useState<ModelConfig | null>(null)
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null)
-  const [form] = Form.useForm<FormValues>()
+  const [form] = Form.useForm<ModelFormValues>()
 
   const { data: models = [], isLoading } = useQuery({
     queryKey: ['models'],
@@ -139,7 +138,7 @@ export default function ModelManagementPage() {
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: Partial<FormValues> }) => updateModel(id, data),
+    mutationFn: ({ id, data }: { id: string; data: ReturnType<typeof buildModelPayload> }) => updateModel(id, data),
     onSuccess: () => {
       message.success('模型已更新')
       queryClient.invalidateQueries({ queryKey: ['models'] })
@@ -169,7 +168,7 @@ export default function ModelManagementPage() {
       name: record.name,
       provider: record.provider,
       api_url: record.api_url,
-      api_key: record.api_key,
+      api_key: '',
       model_id: record.model_id,
     })
     setDrawerOpen(true)
@@ -185,11 +184,12 @@ export default function ModelManagementPage() {
     }
   }
 
-  function handleSubmit(values: FormValues) {
+  function handleSubmit(values: ModelFormValues) {
+    const payload = buildModelPayload(values, !!editing)
     if (editing) {
-      updateMutation.mutate({ id: editing.id, data: values })
+      updateMutation.mutate({ id: editing.id, data: payload })
     } else {
-      createMutation.mutate(values)
+      createMutation.mutate(payload as Parameters<typeof createModel>[0])
     }
   }
 
@@ -204,6 +204,12 @@ export default function ModelManagementPage() {
       render: (p: string) => <Tag>{providerLabels[p] ?? p}</Tag>,
     },
     { title: 'API地址', dataIndex: 'api_url', key: 'api_url', ellipsis: true },
+    {
+      title: 'API密钥',
+      dataIndex: 'api_key',
+      key: 'api_key',
+      render: (value: string) => <code>{maskApiKey(value)}</code>,
+    },
     { title: '模型ID', dataIndex: 'model_id', key: 'model_id' },
     {
       title: '更新时间',
@@ -334,9 +340,10 @@ export default function ModelManagementPage() {
           <Form.Item
             label="API 密钥"
             name="api_key"
-            rules={[{ required: true, message: '请输入 API 密钥' }]}
+            rules={[{ required: !editing, message: '请输入 API 密钥' }]}
+            extra={editing ? '已保存的密钥不会再次明文展示；如需更换，请输入新密钥，留空则保持不变。' : undefined}
           >
-            <Input.Password placeholder="请输入 API 密钥" />
+            <Input.Password placeholder={editing ? '留空表示保持当前密钥' : '请输入 API 密钥'} />
           </Form.Item>
 
           <Form.Item

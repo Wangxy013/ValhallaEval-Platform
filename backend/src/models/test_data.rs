@@ -37,3 +37,8 @@ pub struct CreateTestItem {
     pub metadata: Option<serde_json::Value>,
     pub order_index: Option<i64>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTestItemsBatch {
+    pub contents: Vec<String>,
+}

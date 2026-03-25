@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppJson, AppResult};
-use crate::models::{CreateModelConfig, ModelConfig, UpdateModelConfig};
+use crate::models::{resolve_api_key_update, CreateModelConfig, ModelConfig, UpdateModelConfig};
 
 pub async fn list_models(State(pool): State<PgPool>) -> AppResult<Json<Value>> {
     let models = sqlx::query_as::<_, ModelConfig>(
@@ -18,7 +18,9 @@ pub async fn list_models(State(pool): State<PgPool>) -> AppResult<Json<Value>> {
     .fetch_all(&pool)
     .await?;
 
-    Ok(Json(json!({ "success": true, "data": models })))
+    let masked_models: Vec<ModelConfig> = models.into_iter().map(ModelConfig::masked).collect();
+
+    Ok(Json(json!({ "success": true, "data": masked_models })))
 }
 
 pub async fn create_model(
@@ -51,7 +53,10 @@ pub async fn create_model(
     .fetch_one(&pool)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "success": true, "data": model }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "success": true, "data": model.masked() })),
+    ))
 }
 
 pub async fn get_model(
@@ -66,7 +71,7 @@ pub async fn get_model(
     .await?
     .ok_or_else(|| AppError::NotFound(format!("Model config {} not found", id)))?;
 
-    Ok(Json(json!({ "success": true, "data": model })))
+    Ok(Json(json!({ "success": true, "data": model.masked() })))
 }
 
 pub async fn update_model(
@@ -84,7 +89,7 @@ pub async fn update_model(
 
     let name = payload.name.unwrap_or(existing.name);
     let provider = payload.provider.unwrap_or(existing.provider);
-    let api_key = payload.api_key.unwrap_or(existing.api_key);
+    let api_key = resolve_api_key_update(payload.api_key, &existing.api_key);
     let api_url = payload.api_url.unwrap_or(existing.api_url);
     let model_id = payload.model_id.unwrap_or(existing.model_id);
     let extra_config = payload
@@ -115,7 +120,7 @@ pub async fn update_model(
     .fetch_one(&pool)
     .await?;
 
-    Ok(Json(json!({ "success": true, "data": model })))
+    Ok(Json(json!({ "success": true, "data": model.masked() })))
 }
 
 pub async fn delete_model(
@@ -123,12 +128,11 @@ pub async fn delete_model(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     // Check for active task references
-    let refs: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM task_models WHERE model_config_id = $1"
-    )
-    .bind(&id)
-    .fetch_one(&pool)
-    .await?;
+    let refs: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM task_models WHERE model_config_id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await?;
     if refs.0 > 0 {
         return Err(AppError::Conflict(format!(
             "该模型已被 {} 个评测任务引用，删除前请先删除相关任务",

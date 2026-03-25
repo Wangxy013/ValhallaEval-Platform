@@ -54,6 +54,9 @@ GET /api/v1/models
 ]
 ```
 
+- `api_key` 在列表、详情、创建响应和更新响应中始终为脱敏值。
+- 编辑模型时如果 `api_key` 传空字符串或纯空白，后端会保留原密钥不变。
+
 ### 创建模型
 
 ```
@@ -175,6 +178,7 @@ DELETE /api/v1/datasets/:id        # 删除（级联删除测试数据）
 ```
 GET    /api/v1/datasets/:id/items                # 获取数据项列表
 POST   /api/v1/datasets/:id/items                # 添加数据项
+POST   /api/v1/datasets/:id/items/batch          # 批量添加数据项
 DELETE /api/v1/datasets/:id/items/:item_id       # 删除数据项
 ```
 
@@ -186,6 +190,22 @@ DELETE /api/v1/datasets/:id/items/:item_id       # 删除数据项
   "order_index": 0
 }
 ```
+
+- `order_index` 可选，不传时后端会自动追加到当前数据集末尾。
+
+**批量导入测试数据请求体**
+
+```json
+{
+  "contents": [
+    "请阅读短文后回答问题：小明先去了哪里？",
+    "请根据材料概括中心思想。"
+  ]
+}
+```
+
+- `contents` 中的空字符串或纯空白行会被自动忽略。
+- 返回结果中的 `order_index` 会按当前数据集顺序连续分配，确保前端序号稳定递增。
 
 ---
 
@@ -205,6 +225,8 @@ POST /api/v1/tasks
   "description": "验证 v2 格式优化是否生效",
   "eval_type": "prompt_comparison",
   "model_config_ids": ["model-uuid"],
+  "validation_model_id": "judge-model-uuid",
+  "assessment_model_id": "assessment-model-uuid",
   "prompt_ids": ["prompt-v1-uuid", "prompt-v2-uuid"],
   "baseline_prompt_id": "prompt-v1-uuid",
   "dataset_id": "dataset-uuid",
@@ -222,7 +244,9 @@ POST /api/v1/tasks
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `eval_type` | string | ✓ | `prompt_comparison` 或 `model_comparison` |
-| `model_config_ids` | string[] | ✓ | Prompt 对比模式需恰好 1 个；模型对比需 2+ 个 |
+| `model_config_ids` | string[] | ✓ | 推理阶段模型。Prompt 对比模式需恰好 1 个；模型对比需 2+ 个 |
+| `validation_model_id` | string | ✓ | 校验阶段模型，只能配置 1 个 |
+| `assessment_model_id` | string | ✓ | 评估阶段模型，只能配置 1 个 |
 | `prompt_ids` | string[] | ✓ | Prompt 对比模式需 2+ 个；模型对比需恰好 1 个 |
 | `baseline_prompt_id` | string | — | Prompt 对比模式下的对比基准，默认为第一个选中的 Prompt |
 | `dataset_id` | string | — | 关联的数据集 ID |
@@ -232,7 +256,7 @@ POST /api/v1/tasks
 | `assessment_mode` | string | — | `manual`/`auto`/`custom`，默认 `manual` |
 | `validation_checkpoints` | array | — | 校验检查点，不填则无法使用验证校验功能 |
 
-**响应 `data`**：创建后的完整任务对象（含 `prompts`、`models`、`test_items` 关联数据）
+**响应 `data`**：创建后的完整任务对象（含 `prompts`、`models`、`test_items`、`validation_model`、`assessment_model` 关联数据）
 
 ### 获取任务列表
 
@@ -384,7 +408,7 @@ POST /api/v1/tasks/:id/validate
 
 **前置条件**：任务已有完成状态的 eval_run，且已配置至少 1 个校验点。
 
-**行为**：异步，对每条 `completed` 的 eval_run × 每个 checkpoint，调用 LLM 裁判判断 PASS/FAIL，结果写入 `validation_results`。已校验的配对自动跳过（幂等）。
+**行为**：异步，对每条 `completed` 的 eval_run × 每个 checkpoint，调用校验阶段模型。裁判 prompt 会同时传入「校验点名称 + 校验标准 + 模型输出」，并要求以中文 JSON 返回 `pass` / `fail` 与中文说明；结果写入 `validation_results`。已校验的配对自动跳过（幂等）。
 
 ---
 
@@ -507,4 +531,3 @@ GET /api/v1/tasks/:id/progress
 | `validation.done` | status IN ('pass','fail','error') 的记录数 |
 | `validation.pending` | status='pending' 的记录数（>0 表示校验进行中） |
 | `assessment.done` | 已完成自动评估的 eval_run 数（按 mode='auto' 去重） |
-

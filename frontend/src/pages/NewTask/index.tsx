@@ -11,6 +11,7 @@ import { listPrompts } from '../../api/prompts'
 import { listDatasets, listTestItems } from '../../api/datasets'
 import { createTask } from '../../api/tasks'
 import type { ModelConfig, Prompt, TestItem, EvalType, AssessmentMode } from '../../types'
+import { validateStageModelSelection } from './helpers'
 
 const { Title, Text } = Typography
 const { TextArea } = Input
@@ -20,6 +21,8 @@ interface FormState {
   description: string
   eval_type: EvalType
   model_config_ids: string[]
+  validation_model_id: string
+  assessment_model_id: string
   prompt_ids: string[]
   baseline_prompt_id: string   // empty string = auto (first selected)
   dataset_id: string
@@ -36,6 +39,8 @@ const initialState: FormState = {
   description: '',
   eval_type: 'prompt_comparison',
   model_config_ids: [],
+  validation_model_id: '',
+  assessment_model_id: '',
   prompt_ids: [],
   baseline_prompt_id: '',
   dataset_id: '',
@@ -108,11 +113,24 @@ export default function NewTaskPage() {
 
   function handleSubmit() {
     if (!validateStep()) return
+    const stageModelErrors = validateStageModelSelection({
+      evalType: form.eval_type,
+      inferenceModelIds: form.model_config_ids,
+      validationModelId: form.validation_model_id || undefined,
+      assessmentMode: form.assessment_mode,
+      assessmentModelId: form.assessment_model_id || undefined,
+    })
+    if (stageModelErrors.length > 0) {
+      message.warning(stageModelErrors[0])
+      return
+    }
     createMutation.mutate({
       name: form.name,
       description: form.description,
       eval_type: form.eval_type,
       model_config_ids: form.model_config_ids,
+      validation_model_id: form.validation_model_id,
+      assessment_model_id: form.assessment_model_id,
       prompt_ids: form.prompt_ids,
       baseline_prompt_id: form.baseline_prompt_id || form.prompt_ids[0] || undefined,
       dataset_id: form.dataset_id,
@@ -410,6 +428,16 @@ export default function NewTaskPage() {
     <div key="step4">
       <Title level={5}>校验与评估</Title>
       <Divider orientation="left">校验检查点</Divider>
+      <Form layout="vertical" style={{ maxWidth: 600, marginBottom: 24 }}>
+        <Form.Item label="校验阶段模型" required extra="用于逐条执行校验点判断，只能选择 1 个模型">
+          <Select
+            placeholder="请选择校验阶段模型"
+            value={form.validation_model_id || undefined}
+            onChange={value => updateForm({ validation_model_id: value })}
+            options={models.map(model => ({ label: `${model.name} (${model.model_id})`, value: model.id }))}
+          />
+        </Form.Item>
+      </Form>
       {form.checkpoints.map((cp, idx) => (
         <Card
           key={idx}
@@ -476,6 +504,20 @@ export default function NewTaskPage() {
             />
           </Form.Item>
         )}
+        <Form.Item
+          label="评估阶段模型"
+          required
+          extra={form.assessment_mode === 'manual'
+            ? '当前为人工评估模式，暂不会调用该模型；保存后可切换到自动评估继续使用'
+            : '用于自动评估阶段，只能选择 1 个模型'}
+        >
+          <Select
+            placeholder="请选择评估阶段模型"
+            value={form.assessment_model_id || undefined}
+            onChange={value => updateForm({ assessment_model_id: value })}
+            options={models.map(model => ({ label: `${model.name} (${model.model_id})`, value: model.id }))}
+          />
+        </Form.Item>
       </Form>
 
       <Divider orientation="left">配置预览</Divider>
@@ -483,6 +525,8 @@ export default function NewTaskPage() {
         <p><strong>任务名称：</strong>{form.name}</p>
         <p><strong>评测类型：</strong>{form.eval_type === 'prompt_comparison' ? 'Prompt对比测试' : '模型横向对比'}</p>
         <p><strong>已选模型：</strong>{form.model_config_ids.length} 个</p>
+        <p><strong>校验模型：</strong>{models.find(model => model.id === form.validation_model_id)?.name ?? '-'}</p>
+        <p><strong>评估模型：</strong>{models.find(model => model.id === form.assessment_model_id)?.name ?? '-'}</p>
         <p><strong>已选Prompt：</strong>{form.prompt_ids.length} 个
           {form.eval_type === 'prompt_comparison' && form.prompt_ids.length > 0 && (
             <span style={{ marginLeft: 8, color: '#999', fontSize: 12 }}>

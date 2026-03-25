@@ -21,6 +21,7 @@ pub struct ValidationResult {
     pub created_at: i64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Annotation {
     pub key: String,
@@ -34,6 +35,7 @@ pub struct CreateCheckpoint {
     pub order_index: Option<i64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct UpdateValidationResult {
     pub status: Option<String>,

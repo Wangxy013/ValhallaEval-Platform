@@ -26,3 +26,7 @@ frontend/.env.local
 
 # Docker volumes (if created locally)
 postgres_data/
+
+# Local-only files
+local/
+AGENTS.md
