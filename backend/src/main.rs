@@ -5,13 +5,88 @@ mod models;
 mod routes;
 
 use axum::{
+    http::StatusCode,
     routing::{delete, get, post, put},
     Router,
 };
+use sqlx::PgPool;
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+async fn healthcheck() -> StatusCode {
+    StatusCode::OK
+}
+
+fn api_v1_routes() -> Router<PgPool> {
+    Router::new()
+        // Model configs
+        .route("/models", get(routes::models::list_models))
+        .route("/models", post(routes::models::create_model))
+        .route("/models/:id", get(routes::models::get_model))
+        .route("/models/:id", put(routes::models::update_model))
+        .route("/models/:id", delete(routes::models::delete_model))
+        // Prompts
+        .route("/prompts", get(routes::prompts::list_prompts))
+        .route("/prompts", post(routes::prompts::create_prompt))
+        .route("/prompts/:id", get(routes::prompts::get_prompt))
+        .route("/prompts/:id", put(routes::prompts::update_prompt))
+        .route("/prompts/:id", delete(routes::prompts::delete_prompt))
+        // Datasets
+        .route("/datasets", get(routes::datasets::list_datasets))
+        .route("/datasets", post(routes::datasets::create_dataset))
+        .route("/datasets/:id", get(routes::datasets::get_dataset))
+        .route("/datasets/:id", put(routes::datasets::update_dataset))
+        .route("/datasets/:id", delete(routes::datasets::delete_dataset))
+        .route("/datasets/:id/items", get(routes::datasets::list_items))
+        .route("/datasets/:id/items", post(routes::datasets::create_item))
+        .route(
+            "/datasets/:id/items/:item_id",
+            delete(routes::datasets::delete_item),
+        )
+        // Tasks
+        .route("/tasks", get(routes::tasks::list_tasks))
+        .route("/tasks", post(routes::tasks::create_task))
+        .route("/tasks/:id", get(routes::tasks::get_task))
+        .route("/tasks/:id", put(routes::tasks::update_task))
+        .route("/tasks/:id", delete(routes::tasks::delete_task))
+        .route("/tasks/:id/execute", post(routes::tasks::execute_task))
+        .route("/tasks/:id/pause", post(routes::tasks::pause_task))
+        .route("/tasks/:id/resume", post(routes::tasks::resume_task))
+        .route("/tasks/:id/runs", get(routes::tasks::get_task_runs))
+        // Checkpoints
+        .route("/tasks/:id/checkpoints", get(routes::tasks::list_checkpoints))
+        .route("/tasks/:id/checkpoints", post(routes::tasks::create_checkpoint))
+        .route(
+            "/tasks/:id/checkpoints/:checkpoint_id",
+            put(routes::tasks::update_checkpoint),
+        )
+        .route(
+            "/tasks/:id/checkpoints/:checkpoint_id",
+            delete(routes::tasks::delete_checkpoint),
+        )
+        // Validation
+        .route("/tasks/:id/validate", post(routes::tasks::validate_task))
+        // Assessment
+        .route("/tasks/:id/assessment", get(routes::tasks::get_assessment))
+        .route("/tasks/:id/assessment", post(routes::tasks::create_assessment))
+        .route("/tasks/:id/assess", post(routes::tasks::auto_assess_task))
+        .route(
+            "/tasks/:id/assess/manual",
+            post(routes::tasks::manual_assess_task),
+        )
+        // Results
+        .route(
+            "/tasks/:id/results/overview",
+            get(routes::tasks::get_results_overview),
+        )
+        .route(
+            "/tasks/:id/results/details",
+            get(routes::tasks::get_results_details),
+        )
+        .route("/tasks/:id/progress", get(routes::tasks::get_task_progress))
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -46,90 +121,11 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    let api_v1 = api_v1_routes();
     let app = Router::new()
-        // Model configs
-        .route("/api/v1/models", get(routes::models::list_models))
-        .route("/api/v1/models", post(routes::models::create_model))
-        .route("/api/v1/models/:id", get(routes::models::get_model))
-        .route("/api/v1/models/:id", put(routes::models::update_model))
-        .route("/api/v1/models/:id", delete(routes::models::delete_model))
-        // Prompts
-        .route("/api/v1/prompts", get(routes::prompts::list_prompts))
-        .route("/api/v1/prompts", post(routes::prompts::create_prompt))
-        .route("/api/v1/prompts/:id", get(routes::prompts::get_prompt))
-        .route("/api/v1/prompts/:id", put(routes::prompts::update_prompt))
-        .route("/api/v1/prompts/:id", delete(routes::prompts::delete_prompt))
-        // Datasets
-        .route("/api/v1/datasets", get(routes::datasets::list_datasets))
-        .route("/api/v1/datasets", post(routes::datasets::create_dataset))
-        .route("/api/v1/datasets/:id", get(routes::datasets::get_dataset))
-        .route("/api/v1/datasets/:id", put(routes::datasets::update_dataset))
-        .route("/api/v1/datasets/:id", delete(routes::datasets::delete_dataset))
-        .route("/api/v1/datasets/:id/items", get(routes::datasets::list_items))
-        .route("/api/v1/datasets/:id/items", post(routes::datasets::create_item))
-        .route(
-            "/api/v1/datasets/:id/items/:item_id",
-            delete(routes::datasets::delete_item),
-        )
-        // Tasks
-        .route("/api/v1/tasks", get(routes::tasks::list_tasks))
-        .route("/api/v1/tasks", post(routes::tasks::create_task))
-        .route("/api/v1/tasks/:id", get(routes::tasks::get_task))
-        .route("/api/v1/tasks/:id", put(routes::tasks::update_task))
-        .route("/api/v1/tasks/:id", delete(routes::tasks::delete_task))
-        .route("/api/v1/tasks/:id/execute", post(routes::tasks::execute_task))
-        .route("/api/v1/tasks/:id/pause", post(routes::tasks::pause_task))
-        .route("/api/v1/tasks/:id/resume", post(routes::tasks::resume_task))
-        .route("/api/v1/tasks/:id/runs", get(routes::tasks::get_task_runs))
-        // Checkpoints
-        .route(
-            "/api/v1/tasks/:id/checkpoints",
-            get(routes::tasks::list_checkpoints),
-        )
-        .route(
-            "/api/v1/tasks/:id/checkpoints",
-            post(routes::tasks::create_checkpoint),
-        )
-        .route(
-            "/api/v1/tasks/:id/checkpoints/:checkpoint_id",
-            put(routes::tasks::update_checkpoint),
-        )
-        .route(
-            "/api/v1/tasks/:id/checkpoints/:checkpoint_id",
-            delete(routes::tasks::delete_checkpoint),
-        )
-        // Validation
-        .route("/api/v1/tasks/:id/validate", post(routes::tasks::validate_task))
-        // Assessment
-        .route(
-            "/api/v1/tasks/:id/assessment",
-            get(routes::tasks::get_assessment),
-        )
-        .route(
-            "/api/v1/tasks/:id/assessment",
-            post(routes::tasks::create_assessment),
-        )
-        .route(
-            "/api/v1/tasks/:id/assess",
-            post(routes::tasks::auto_assess_task),
-        )
-        .route(
-            "/api/v1/tasks/:id/assess/manual",
-            post(routes::tasks::manual_assess_task),
-        )
-        // Results
-        .route(
-            "/api/v1/tasks/:id/results/overview",
-            get(routes::tasks::get_results_overview),
-        )
-        .route(
-            "/api/v1/tasks/:id/results/details",
-            get(routes::tasks::get_results_details),
-        )
-        .route(
-            "/api/v1/tasks/:id/progress",
-            get(routes::tasks::get_task_progress),
-        )
+        .route("/health", get(healthcheck))
+        .nest("/api/v1", api_v1.clone())
+        .nest("/v1", api_v1)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(pool);

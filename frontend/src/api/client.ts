@@ -1,8 +1,11 @@
 import axios from 'axios'
 import { message } from 'antd'
 
+const defaultApiBaseUrl = import.meta.env.DEV ? '/api/v1' : '/valhalla-eval/api/v1'
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || defaultApiBaseUrl
+
 const client = axios.create({
-  baseURL: '/api/v1',
+  baseURL: apiBaseUrl,
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json',

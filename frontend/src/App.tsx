@@ -14,6 +14,7 @@ import PromptManagementPage from './pages/PromptManagement'
 import TestDataManagementPage from './pages/TestDataManagement'
 
 const { Header, Sider, Content } = Layout
+const logoSrc = `${import.meta.env.BASE_URL}logo.png`
 
 const menuItems = [
   {
@@ -62,7 +63,7 @@ export default function App() {
           borderBottom: '1px solid rgba(255,255,255,0.1)',
           padding: '0 12px',
         }}>
-          <img src="/logo.png" alt="logo" style={{ width: 32, height: 32, objectFit: 'contain', flexShrink: 0 }} />
+          <img src={logoSrc} alt="logo" style={{ width: 32, height: 32, objectFit: 'contain', flexShrink: 0 }} />
           <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.3 }}>
             <span style={{ color: '#fff', fontSize: 15, fontWeight: 700, letterSpacing: 1 }}>
               ValhallaEval
