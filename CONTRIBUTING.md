@@ -4,6 +4,10 @@
 
 ---
 
+## AI 协作规范入口
+
+所有 AI 协作工作应以 `docs/ai/README.md` 为入口，在 `docs/ai/skills/skill-catalog.md` 中查找对应的技能说明并遵循仓库级工作流。
+
 ## 开发流程
 
 1. Fork 本仓库
@@ -62,6 +66,8 @@ cargo clippy -- -D warnings
 cd frontend
 npx tsc --noEmit
 ```
+
+完成上述流程后，务必进行一次 GitHub/开源安全审查：逐条确认此次提交的暂存内容不包含任何明文密钥、API Key、Token、凭据或其他敏感信息；仅供内部使用的功能/脚本/配置/非公开流程；仅在本地生效的文件、缓存或临时产物；或任何不符合开源发布规范的产物。
 
 ---
 

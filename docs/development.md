@@ -86,11 +86,11 @@ npm run dev
 ### 一键启动（推荐）
 
 ```bash
-chmod +x dev.sh
-./dev.sh
+chmod +x start.sh stop.sh
+./start.sh
 ```
 
-`dev.sh` 会依次启动 PostgreSQL、后端、前端，并在 Ctrl+C 时统一清理进程。
+使用完毕后可执行 `./stop.sh` 停止本地开发栈。
 
 ### 最近新增的开发约束
 
@@ -332,6 +332,17 @@ node --test \
 ```
 
 ---
+
+## AI 协作工作流
+
+项目级 AI 协作体系现已统一梳理在 `docs/ai/skills/skill-catalog.md`，该文件是所有 Skill 的入口，把开发流程、验证点与沟通环节串联起来。总体思路是先判定任务类型，再激活对应 Skill，确保操作可追踪并与团队标准一致。
+
+技能分组概括如下：
+- `默认必用`：`writing-plans`、`test-driven-development`、`verification-before-completion`、`systematic-debugging`
+- `重要改动必用`：`requesting-code-review`、`receiving-code-review`
+- `按需启用`：`brainstorming`、`using-git-worktrees`、`subagent-driven-development`
+
+在准备将提交推送到 GitHub 或其他开源分支前，务必按 commit 范围做一次安全审查（例如确认没有明文密钥、仅内部用途的配置或临时产物），这个步骤是项目级协作的一环。
 
 ## 常见问题
 

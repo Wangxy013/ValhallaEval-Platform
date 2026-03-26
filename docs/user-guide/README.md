@@ -56,3 +56,7 @@
 | [第5章 创建评测任务](05-create-task.md) | 分步向导详解 |
 | [第6章 执行与校验](06-run-and-validate.md) | 推理执行、验证校验、自动评估 |
 | [第7章 分析结果](07-analyze-results.md) | 总览矩阵与明细对比解读 |
+
+## 面向研发与维护者的补充说明
+
+若你负责本项目的研发或文档维护，可参照 `docs/ai/README.md` 了解 AI 协作原则，`docs/development.md` 获取开发与运行规范，以及 `CONTRIBUTING.md` 熟悉贡献流程与要求。

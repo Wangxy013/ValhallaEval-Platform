@@ -82,7 +82,7 @@
 ```bash
 git clone <repo-url> && cd ValhallaEval
 cp backend/.env.example backend/.env   # 按需修改数据库连接
-chmod +x dev.sh && ./dev.sh
+chmod +x start.sh stop.sh && ./start.sh
 ```
 
 启动后访问 **http://localhost:3000**
@@ -120,7 +120,8 @@ ValhallaEval/
 ├── docker/nginx.conf             # 前端 Nginx 配置
 ├── .env.prod.example             # 生产环境变量示例
 │
-├── dev.sh                        # 一键开发启动脚本
+├── start.sh                      # 一键开发启动脚本
+├── stop.sh                       # 停止本地开发栈
 │
 ├── backend/                      # Rust + Axum 后端
 │   ├── Cargo.toml
@@ -150,13 +151,10 @@ ValhallaEval/
 │       ├── api/                  # API 请求封装
 │       ├── components/           # 通用组件
 │       ├── pages/                # 页面组件
-│       ├── hooks/                # 自定义 Hooks
-│       ├── stores/               # 状态管理
 │       ├── types/                # TypeScript 类型
-│       └── utils/                # 工具函数
+│       └── vite-env.d.ts         # Vite 类型声明
 │
 └── docs/                         # 项目文档
-    ├── README.md                 # 文档索引
     ├── architecture.md           # 技术架构设计
     ├── api-reference.md          # API 接口参考
     ├── development.md            # 开发指南
@@ -201,6 +199,10 @@ ValhallaEval/
 | [开发指南](docs/development.md) | 本地开发环境配置与代码规范 |
 | [部署指南](docs/deployment.md) | 生产环境部署方案 |
 | [用户手册](docs/user-guide/README.md) | 面向使用者的操作指南 |
+
+## AI 协作与贡献规范
+
+在开始任何 AI 相关工作前，请先阅读 [docs/ai/README.md]，并参照 [docs/development.md] 与 [CONTRIBUTING.md] 中的贡献流程与编码规范。项目级 AI 工作流的权威来源是 `docs/ai/skills/` 目录，所有技能与协作规则均以此为准，本页不重复列出具体条目。
 
 ---
 
