@@ -1,0 +1,26 @@
+---
+description: 项目级 AI skill 规则
+globs:
+alwaysApply: true
+---
+
+使用 `docs/ai/skills/skill-catalog.md` 及 `docs/ai/skills/` 下的中文 skill 文档作为项目级 AI 工作流的权威来源。
+
+开始时优先阅读：
+
+- `docs/ai/skills/skill-catalog.md`
+
+Skill 触发规则：
+
+- 多步骤实现任务开始前，阅读 `docs/ai/skills/writing-plans.md`。
+- 功能开发、缺陷修复、重构和行为变更默认阅读 `docs/ai/skills/test-driven-development.md`；若为纯文档、纯配置或纯工具适配文件改动，必须显式说明例外原因。
+- 调试时阅读 `docs/ai/skills/systematic-debugging.md`。
+- 在声称任务完成前，阅读 `docs/ai/skills/verification-before-completion.md`。
+- 对于广泛、高风险或评审敏感的改动，阅读 `docs/ai/skills/requesting-code-review.md` 与 `docs/ai/skills/receiving-code-review.md`。
+- 当需求引入新行为或存在多种合理设计路径时，阅读 `docs/ai/skills/brainstorming.md`。
+- 仅当任务确实需要隔离环境或可清晰拆分时，才阅读 `docs/ai/skills/using-git-worktrees.md` 与 `docs/ai/skills/subagent-driven-development.md`。
+
+仓库约束：
+
+- 不要用工具本地偏好替代仓库级 workflow 规则。
+- 任何准备推送到 GitHub 的提交，都必须先做一次提交范围的开源安全审查，排除敏感信息、内部专用内容和本地专用产物。
