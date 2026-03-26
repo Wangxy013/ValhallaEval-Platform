@@ -11,9 +11,9 @@
 ## 开发流程
 
 1. Fork 本仓库
-2. 从 `main` 创建功能分支：`git checkout -b feature/my-feature`
+2. 从 `main` 创建功能分支：人工手工分支使用 `git checkout -b feature/<slug>`；AI 自动创建的 worktree 分支统一使用 `feature/ai/<slug>`
 3. 开发并提交：`git commit -m "feat: 添加XX功能"`
-4. 推送到你的 Fork：`git push origin feature/my-feature`
+4. 推送到你的 Fork：按实际分支名推送，例如 `git push origin feature/<slug>` 或 `git push origin feature/ai/<slug>`
 5. 提交 Pull Request 到 `main` 分支
 
 ---

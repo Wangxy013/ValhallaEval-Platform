@@ -342,6 +342,8 @@ node --test \
 - `重要改动必用`：`requesting-code-review`、`receiving-code-review`
 - `按需启用`：`brainstorming`、`using-git-worktrees`、`subagent-driven-development`
 
+若任务需要使用 Git worktree，分支命名也遵循项目级协作规则：AI 自动创建的 worktree 分支统一使用 `feature/ai/<slug>`，人工手工创建的功能分支继续使用 `feature/<slug>`。
+
 在准备将提交推送到 GitHub 或其他开源分支前，务必按 commit 范围做一次安全审查（例如确认没有明文密钥、仅内部用途的配置或临时产物），这个步骤是项目级协作的一环。
 
 ## 常见问题

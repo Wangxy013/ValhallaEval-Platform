@@ -33,6 +33,7 @@
 - 对于广泛、高风险、跨模块或评审敏感的改动，遵循 `docs/ai/skills/requesting-code-review.md` 与 `docs/ai/skills/receiving-code-review.md`。
 - 当需求引入新行为、方案不清晰或存在多种实现路径时，先执行 `docs/ai/skills/brainstorming.md`。
 - 仅当任务确实需要隔离环境或能够清晰拆分时，才使用 `docs/ai/skills/using-git-worktrees.md` 与 `docs/ai/skills/subagent-driven-development.md`。
+- 当 AI 执行 `using-git-worktrees` 时，自动创建的分支名必须使用 `feature/ai/<slug>`；人工手工创建的功能分支继续使用 `feature/<slug>`。
 
 本地工具自带的 skill、个人偏好配置或插件规则都不能覆盖上述仓库级工作流要求。
 

@@ -9,6 +9,8 @@
 - 优先使用项目内统一约定的 worktree 目录，并确保它被 `.gitignore` 正确忽略。
 - 在开始实现前确认 worktree 基线可用，至少保证关键测试或构建命令能跑通。
 - 不要在 dirty 工作区里直接做大范围实验或并行任务。
+- AI 自动创建的 worktree 分支统一使用 `feature/ai/<slug>` 命名，其中 `<slug>` 使用简短英文 kebab-case。
+- 人工手工创建的功能分支继续使用 `feature/<slug>` 命名，不增加 `ai` 层级。
 
 ## 补充说明
 
